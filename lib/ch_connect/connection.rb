@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
-module Clickhouse
+module ChConnect
   # A single connection to ClickHouse server.
   #
   # @example
-  #   conn = Clickhouse::Connection.new
+  #   conn = ChConnect::Connection.new
   #   response = conn.query("SELECT * FROM users WHERE id = 1")
   class Connection
     # @return [Config] the configuration used by this connection
@@ -13,7 +13,7 @@ module Clickhouse
     # Creates a new connection.
     #
     # @param config [Config] configuration instance (defaults to global config)
-    def initialize(config = Clickhouse.config)
+    def initialize(config = ChConnect.config)
       @config = config
       @transport = HttpTransport.new(config)
     end

@@ -1,31 +1,31 @@
 # frozen_string_literal: true
 
-require_relative "clickhouse/version"
-require_relative "clickhouse/null_instrumenter"
-require_relative "clickhouse/config"
-require_relative "clickhouse/transport_result"
-require_relative "clickhouse/http_transport"
-require_relative "clickhouse/connection"
-require_relative "clickhouse/response"
-require_relative "clickhouse/body_reader"
-require_relative "clickhouse/native_format_parser"
+require_relative "ch_connect/version"
+require_relative "ch_connect/null_instrumenter"
+require_relative "ch_connect/config"
+require_relative "ch_connect/transport_result"
+require_relative "ch_connect/http_transport"
+require_relative "ch_connect/connection"
+require_relative "ch_connect/response"
+require_relative "ch_connect/body_reader"
+require_relative "ch_connect/native_format_parser"
 
 # Ruby client for ClickHouse database with Native format support.
 #
 # @example Basic usage
-#   Clickhouse.configure do |config|
+#   ChConnect.configure do |config|
 #     config.host = "localhost"
 #     config.port = 8123
 #   end
 #
-#   conn = Clickhouse::Connection.new
+#   conn = ChConnect::Connection.new
 #   response = conn.query("SELECT 1")
 #
 # @example Using connection pool
-#   pool = Clickhouse::Pool.new
+#   pool = ChConnect::Pool.new
 #   response = pool.query("SELECT * FROM users")
-module Clickhouse
-  # Base error class for all Clickhouse errors
+module ChConnect
+  # Base error class for all ChConnect errors
   class Error < StandardError; end
 
   # Raised when a query fails (syntax error, unknown table, etc.)

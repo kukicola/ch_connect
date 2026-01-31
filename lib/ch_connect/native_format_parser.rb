@@ -3,7 +3,7 @@
 require "bigdecimal"
 require "ipaddr"
 
-module Clickhouse
+module ChConnect
   # Parser for ClickHouse Native binary format.
   # @api private
   class NativeFormatParser

@@ -3,7 +3,7 @@
 require "httpx"
 require "json"
 
-module Clickhouse
+module ChConnect
   # HTTP transport layer for ClickHouse communication.
   # @api private
   class HttpTransport

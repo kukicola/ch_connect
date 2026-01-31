@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-RSpec.describe Clickhouse::Response do
+RSpec.describe ChConnect::Response do
   describe "#initialize" do
     it "has default empty values" do
       response = described_class.new

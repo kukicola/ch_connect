@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-RSpec.describe Clickhouse::Config do
+RSpec.describe ChConnect::Config do
   describe "#initialize" do
     it "has default values" do
       config = described_class.new

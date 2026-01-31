@@ -2,14 +2,14 @@
 
 require "uri"
 
-module Clickhouse
+module ChConnect
   # Configuration for ClickHouse connection.
   #
   # @example
-  #   config = Clickhouse::Config.new(host: "db.example.com", port: 9000)
+  #   config = ChConnect::Config.new(host: "db.example.com", port: 9000)
   #
   # @example Using URL
-  #   config = Clickhouse::Config.new
+  #   config = ChConnect::Config.new
   #   config.url = "http://user:pass@localhost:8123/mydb"
   class Config
     DEFAULTS = {

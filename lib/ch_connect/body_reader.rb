@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-module Clickhouse
+module ChConnect
   # Wrapper for HTTP response body providing position tracking and EOF detection.
   # @api private
   class BodyReader
