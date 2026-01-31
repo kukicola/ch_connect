@@ -52,9 +52,7 @@ module ChConnect
         columns_data << read_column(col_type, num_rows)
       end
 
-      num_rows.times do |row_idx|
-        @rows << columns_data.map { |col| col[row_idx] }
-      end
+      @rows.concat(columns_data.transpose) if num_rows > 0
     end
 
     def read_column(type, num_rows)
@@ -247,9 +245,8 @@ module ChConnect
       result = 0
       shift = 0
       loop do
-        byte_str = @reader.read(1)
-        return result if byte_str.nil? || byte_str.empty?
-        byte = byte_str.ord
+        byte = @reader.getbyte
+        return result if byte.nil?
         result |= (byte & 0x7F) << shift
         break if (byte & 0x80) == 0
         shift += 7
@@ -286,7 +283,8 @@ module ChConnect
     def read_nullable_column(inner_type, num_rows)
       nulls = @reader.read(num_rows).bytes
       values = read_column(inner_type, num_rows)
-      values.each_with_index.map { |v, i| (nulls[i] == 1) ? nil : v }
+      num_rows.times { |i| values[i] = nil if nulls[i] == 1 }
+      values
     end
 
     # Array: cumulative offsets (uint64 per row), then all elements
@@ -298,10 +296,10 @@ module ChConnect
 
       elements = read_column(inner_type, total_elements)
 
-      arrays = []
+      arrays = Array.new(num_rows)
       prev_offset = 0
-      offsets.each do |offset|
-        arrays << elements[prev_offset...offset]
+      offsets.each_with_index do |offset, i|
+        arrays[i] = elements.slice(prev_offset, offset - prev_offset)
         prev_offset = offset
       end
       arrays
@@ -317,10 +315,11 @@ module ChConnect
       keys = read_column(key_type, total_pairs)
       values = read_column(value_type, total_pairs)
 
-      maps = []
+      maps = Array.new(num_rows)
       prev_offset = 0
-      offsets.each do |offset|
-        maps << keys[prev_offset...offset].zip(values[prev_offset...offset]).to_h
+      offsets.each_with_index do |offset, i|
+        len = offset - prev_offset
+        maps[i] = keys.slice(prev_offset, len).zip(values.slice(prev_offset, len)).to_h
         prev_offset = offset
       end
       maps
