@@ -1,4 +1,6 @@
-# clickhouse-rb
+# ch_connect
+
+> **Note:** This gem was previously published as `clickhouse-rb` and has been renamed to `ch_connect` due to name conflicts.
 
 Fast Ruby client for ClickHouse database using the Native binary format for efficient data transfer.
 
@@ -14,7 +16,7 @@ Fast Ruby client for ClickHouse database using the Native binary format for effi
 Add to your Gemfile:
 
 ```ruby
-gem "clickhouse-rb"
+gem "ch_connect"
 ```
 
 Then run:
@@ -28,9 +30,9 @@ bundle install
 ### Configuration
 
 ```ruby
-require "clickhouse"
+require "ch_connect"
 
-Clickhouse.configure do |config|
+ChConnect.configure do |config|
   config.host = "localhost"
   config.port = 8123
   config.database = "default"
@@ -42,7 +44,7 @@ end
 Or configure via URL:
 
 ```ruby
-Clickhouse.configure do |config|
+ChConnect.configure do |config|
   config.url = "http://user:pass@localhost:8123/mydb"
 end
 ```
@@ -50,7 +52,7 @@ end
 ### Single Connection
 
 ```ruby
-conn = Clickhouse::Connection.new
+conn = ChConnect::Connection.new
 response = conn.query("SELECT id, name FROM users WHERE active = true")
 
 response.each do |row|
@@ -63,7 +65,7 @@ end
 Connections use httpx's built-in connection pooling, making them safe for concurrent use:
 
 ```ruby
-conn = Clickhouse::Connection.new
+conn = ChConnect::Connection.new
 
 threads = 10.times.map do
   Thread.new { conn.query("SELECT 1") }
@@ -74,8 +76,8 @@ threads.each(&:join)
 Pool settings are configured globally:
 
 ```ruby
-Clickhouse.configure do |config|
-  config.pool_size = 10 
+ChConnect.configure do |config|
+  config.pool_size = 10
   config.pool_timeout = 5
 end
 ```
@@ -161,7 +163,7 @@ response = conn.query(
 You can instrument queries by providing an instrumenter that responds to `#instrument`:
 
 ```ruby
-Clickhouse.configure do |config|
+ChConnect.configure do |config|
   config.instrumenter = ActiveSupport::Notifications
 end
 
@@ -178,14 +180,14 @@ The instrumenter receives event name `"query.clickhouse"` and payload `{sql: "..
 ```ruby
 begin
   conn.query("INVALID SQL")
-rescue Clickhouse::QueryError => e
+rescue ChConnect::QueryError => e
   puts "Query failed: #{e.message}"
 end
 
 # Unsupported types raise an exception
 begin
   conn.query("SELECT '{}'::JSON")
-rescue Clickhouse::UnsupportedTypeError => e
+rescue ChConnect::UnsupportedTypeError => e
   puts "Unsupported type: #{e.message}"
 end
 ```

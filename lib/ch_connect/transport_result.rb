@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-module Clickhouse
+module ChConnect
   # Immutable result from transport layer.
   # @api private
   #

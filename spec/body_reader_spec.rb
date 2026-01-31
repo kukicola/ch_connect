@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-RSpec.describe Clickhouse::BodyReader do
+RSpec.describe ChConnect::BodyReader do
   let(:content) { "Hello, World!".b }
   let(:body) do
     io = StringIO.new(content)

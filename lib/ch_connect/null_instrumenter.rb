@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-module Clickhouse
+module ChConnect
   # Null instrumenter that does nothing.
   # This is the default instrumenter used when no custom instrumenter is configured.
   class NullInstrumenter

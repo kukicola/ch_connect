@@ -1,16 +1,16 @@
 # frozen_string_literal: true
 
-RSpec.describe Clickhouse do
+RSpec.describe ChConnect do
   describe ".config" do
     it "returns a Config instance" do
-      expect(described_class.config).to be_a(Clickhouse::Config)
+      expect(described_class.config).to be_a(ChConnect::Config)
     end
   end
 
   describe ".configure" do
     it "yields the config" do
       described_class.configure do |config|
-        expect(config).to be_a(Clickhouse::Config)
+        expect(config).to be_a(ChConnect::Config)
       end
     end
 
@@ -20,7 +20,7 @@ RSpec.describe Clickhouse do
   end
 
   describe "querying" do
-    let(:connection) { Clickhouse::Connection.new }
+    let(:connection) { ChConnect::Connection.new }
 
     describe "integer types" do
       it "parses UInt8" do
@@ -394,19 +394,19 @@ RSpec.describe Clickhouse do
       it "raises QueryError for invalid query" do
         expect {
           connection.query("INVALID SQL")
-        }.to raise_error(Clickhouse::QueryError, /Syntax error/)
+        }.to raise_error(ChConnect::QueryError, /Syntax error/)
       end
 
       it "raises QueryError for non-existent table" do
         expect {
           connection.query("SELECT * FROM non_existent_table_12345")
-        }.to raise_error(Clickhouse::QueryError, /UNKNOWN_TABLE/)
+        }.to raise_error(ChConnect::QueryError, /UNKNOWN_TABLE/)
       end
 
       it "raises UnsupportedTypeError for JSON type" do
         expect {
           connection.query("SELECT '{\"a\": 1}'::JSON")
-        }.to raise_error(Clickhouse::UnsupportedTypeError, /Unsupported column type: JSON/)
+        }.to raise_error(ChConnect::UnsupportedTypeError, /Unsupported column type: JSON/)
       end
     end
 
@@ -444,8 +444,8 @@ RSpec.describe Clickhouse do
     end
 
     let(:instrumenter_instance) { fake_instrumenter.new }
-    let(:config) { Clickhouse.config.dup.tap { |c| c.instrumenter = instrumenter_instance } }
-    let(:connection) { Clickhouse::Connection.new(config) }
+    let(:config) { ChConnect.config.dup.tap { |c| c.instrumenter = instrumenter_instance } }
+    let(:connection) { ChConnect::Connection.new(config) }
 
     it "calls instrumenter on query" do
       connection.query("SELECT 1")

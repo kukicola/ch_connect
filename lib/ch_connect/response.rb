@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-module Clickhouse
+module ChConnect
   # Immutable response object containing query results.
   #
   # @example

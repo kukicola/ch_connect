@@ -8,9 +8,9 @@ SimpleCov.start do
   add_filter "/spec/"
 end
 
-require "clickhouse"
+require "ch_connect"
 
-Clickhouse.configure do |config|
+ChConnect.configure do |config|
   config.url = ENV.fetch("CLICKHOUSE_URL", "http://localhost:8123/default")
 end
 
