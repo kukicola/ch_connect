@@ -11,6 +11,28 @@ Fast Ruby client for ClickHouse database using the Native binary format for effi
 - Thread-safe concurrent access
 - Supports all common ClickHouse data types
 
+## Benchmarks
+
+Compared against other Ruby ClickHouse gems ([click_house](https://github.com/shlima/click_house), [clickhouse](https://github.com/archan937/clickhouse), [click_house-client](https://gitlab.com/gitlab-org/ruby/gems/clickhouse-client)) on Ruby 3.4.3:
+
+**Speed (iterations/second, higher is better):**
+
+| Scenario | ch_connect | click_house | clickhouse | click_house-client |
+|----------|------------|-------------|------------|--------------------|
+| Small queries (10 rows) | **680 i/s** | 342 i/s (2.0x slower) | 293 i/s (2.3x slower) | 346 i/s (2.0x slower) |
+| Large queries (100K rows) | **3.5 i/s** | 1.1 i/s (3.3x slower) | 0.5 i/s (6.9x slower) | 1.6 i/s (2.2x slower) |
+
+**Memory (large query, lower is better):**
+
+| Gem | Allocated |
+|-----|-----------|
+| ch_connect | **130 MB** |
+| click_house | 205 MB (1.6x more) |
+| clickhouse | 483 MB (3.7x more) |
+| click_house-client | 210 MB (1.6x more) |
+
+See `benchmark/` directory for full benchmark suite and methodology.
+
 ## Installation
 
 Add to your Gemfile:

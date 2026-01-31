@@ -1,0 +1,19 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+# Ruby 3.4+ compatibility
+gem "csv"
+
+# Pin older Faraday for clickhouse (archan937) compatibility
+gem "faraday", "~> 1.10"
+
+# Gems to benchmark
+gem "ch_connect", path: ".."
+gem "click_house", "~> 2.1"
+gem "clickhouse", "~> 0.1"
+gem "click_house-client", "~> 0.8"
+
+# Benchmarking tools
+gem "benchmark-ips", "~> 2.13"
+gem "memory_profiler", "~> 1.0"
