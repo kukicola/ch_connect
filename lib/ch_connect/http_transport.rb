@@ -14,6 +14,7 @@ module ChConnect
       @config = config
       @base_url = "#{config.scheme}://#{config.host}:#{config.port}"
       @http_client = HTTPX.plugin(:persistent, close_on_fork: true)
+        .plugin(:retries, max_retries: config.max_retries, retry_change_requests: true)
         .with(
           timeout: {
             connect_timeout: config.connection_timeout,

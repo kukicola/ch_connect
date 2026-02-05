@@ -8,6 +8,7 @@ Fast Ruby client for ClickHouse database using the Native binary format for effi
 
 - Native binary format parsing (faster than JSON/TSV)
 - Persistent HTTP connections with built-in connection pooling
+- Automatic retries on connection errors
 - Thread-safe concurrent access
 - Supports all common ClickHouse data types
 
@@ -178,6 +179,7 @@ response = conn.query(
 | `write_timeout` | `60` | Write timeout in seconds |
 | `pool_size` | `100` | Connection pool size |
 | `pool_timeout` | `5` | Pool checkout timeout in seconds |
+| `max_retries` | `3` | Max retry attempts on connection errors (0 to disable) |
 | `instrumenter` | `NullInstrumenter` | Instrumenter for query instrumentation |
 
 ## Instrumentation
