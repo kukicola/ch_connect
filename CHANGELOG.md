@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Added automatic retries on connection errors with configurable `max_retries` (default: 3)
+
 ## [0.2.0] - 2026-01-31
 
 - Added benchmark suite comparing against other ClickHouse Ruby gems ([#5](https://github.com/kukicola/ch_connect/pull/5))

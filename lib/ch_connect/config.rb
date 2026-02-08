@@ -24,6 +24,7 @@ module ChConnect
       write_timeout: 60,
       pool_size: 100,
       pool_timeout: 5,
+      max_retries: 3,
       instrumenter: NullInstrumenter.new
     }.freeze
 
@@ -38,8 +39,9 @@ module ChConnect
     # @return [Integer] Write timeout in seconds
     # @return [Integer] Connection pool size
     # @return [Integer] Pool checkout timeout in seconds
+    # @return [Integer] Max retry attempts on connection errors
     # @return [#instrument] Instrumenter for query instrumentation
-    attr_accessor :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :pool_size, :pool_timeout, :instrumenter
+    attr_accessor :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
 
     # Creates a new configuration instance.
     #
@@ -55,6 +57,7 @@ module ChConnect
     # @option params [Integer] :write_timeout write timeout in seconds (default: 60)
     # @option params [Integer] :pool_size connection pool size (default: 100)
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
+    # @option params [Integer] :max_retries max retry attempts on connection errors (default: 3)
     def initialize(params = {})
       DEFAULTS.merge(params).each do |key, value|
         send("#{key}=", value)
