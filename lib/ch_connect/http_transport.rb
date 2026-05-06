@@ -19,7 +19,8 @@ module ChConnect
           timeout: {
             connect_timeout: config.connection_timeout,
             read_timeout: config.read_timeout,
-            write_timeout: config.write_timeout
+            write_timeout: config.write_timeout,
+            keep_alive_timeout: config.keep_alive_timeout
           },
           pool_options: {
             max_connections_per_origin: config.pool_size,

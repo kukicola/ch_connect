@@ -14,6 +14,7 @@ RSpec.describe ChConnect::Config do
       expect(config.connection_timeout).to eq(5)
       expect(config.read_timeout).to eq(60)
       expect(config.write_timeout).to eq(60)
+      expect(config.keep_alive_timeout).to eq(8)
     end
 
     it "accepts custom values" do
