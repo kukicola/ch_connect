@@ -1,6 +1,8 @@
 ## Unreleased
 
-- Added configurable `keep_alive_timeout` for idle persistent connections (default: 8s)
+## [0.2.2] - 2026-05-06
+
+- Added configurable `keep_alive_timeout` for idle persistent connections (default: 8s) ([#7](https://github.com/kukicola/ch_connect/pull/7))
 
 ## [0.2.1] - 2026-02-08
 
