@@ -177,6 +177,7 @@ response = conn.query(
 | `connection_timeout` | `5` | Connection timeout in seconds |
 | `read_timeout` | `60` | Read timeout in seconds |
 | `write_timeout` | `60` | Write timeout in seconds |
+| `keep_alive_timeout` | `8` | Idle persistent connection timeout in seconds |
 | `pool_size` | `100` | Connection pool size |
 | `pool_timeout` | `5` | Pool checkout timeout in seconds |
 | `max_retries` | `3` | Max retry attempts on connection errors (0 to disable) |

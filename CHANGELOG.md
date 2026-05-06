@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Added configurable `keep_alive_timeout` for idle persistent connections (default: 8s)
+
 ## [0.2.1] - 2026-02-08
 
 - Added automatic retries on connection errors with configurable `max_retries` (default: 3) ([#6](https://github.com/kukicola/ch_connect/pull/6))

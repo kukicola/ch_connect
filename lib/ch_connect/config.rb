@@ -22,6 +22,7 @@ module ChConnect
       connection_timeout: 5,
       read_timeout: 60,
       write_timeout: 60,
+      keep_alive_timeout: 8,
       pool_size: 100,
       pool_timeout: 5,
       max_retries: 3,
@@ -37,11 +38,12 @@ module ChConnect
     # @return [Integer] Connection timeout in seconds
     # @return [Integer] Read timeout in seconds
     # @return [Integer] Write timeout in seconds
+    # @return [Integer] Keep-alive timeout for idle persistent connections in seconds
     # @return [Integer] Connection pool size
     # @return [Integer] Pool checkout timeout in seconds
     # @return [Integer] Max retry attempts on connection errors
     # @return [#instrument] Instrumenter for query instrumentation
-    attr_accessor :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    attr_accessor :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
 
     # Creates a new configuration instance.
     #
@@ -55,6 +57,7 @@ module ChConnect
     # @option params [Integer] :connection_timeout connection timeout in seconds (default: 5)
     # @option params [Integer] :read_timeout read timeout in seconds (default: 60)
     # @option params [Integer] :write_timeout write timeout in seconds (default: 60)
+    # @option params [Integer] :keep_alive_timeout idle persistent connection timeout in seconds (default: 8)
     # @option params [Integer] :pool_size connection pool size (default: 100)
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
     # @option params [Integer] :max_retries max retry attempts on connection errors (default: 3)
