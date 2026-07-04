@@ -3,7 +3,7 @@
 require_relative "../benchmark_helper"
 require_relative "../adapters"
 
-SMALL_QUERY = "SELECT number FROM system.numbers LIMIT 10"
+SMALL_QUERY = BenchmarkHelper::SMALL_QUERY
 
 puts "=" * 60
 puts "SCENARIO 1: Small Query Benchmark"
@@ -15,6 +15,7 @@ puts
 config = BenchmarkHelper::CONFIG
 adapters = {
   ch_connect: Adapters::ChConnectAdapter.new(config),
+  ch_connect_tcp: Adapters::ChConnectTcpAdapter.new(config),
   click_house: Adapters::ClickHouseAdapter.new(config),
   clickhouse: Adapters::ClickhouseAdapter.new(config),
   gitlab: Adapters::GitlabAdapter.new(config)

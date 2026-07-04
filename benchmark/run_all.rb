@@ -9,7 +9,8 @@ puts
 
 scenarios = {
   "Scenario 1: Small Queries" => "scenarios/small_queries.rb",
-  "Scenario 2: Big Queries" => "scenarios/big_queries.rb"
+  "Scenario 2: Big Queries" => "scenarios/big_queries.rb",
+  "Scenario 3: Threaded" => "scenarios/threaded.rb"
 }
 
 # Parse command line arguments

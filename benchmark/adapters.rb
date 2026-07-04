@@ -29,6 +29,27 @@ module Adapters
     def result_row_count(result) = result.rows.size
   end
 
+  # Adapter for ch_connect native TCP transport - Native format, C parser
+  class ChConnectTcpAdapter
+    attr_reader :connection
+
+    def initialize(config = {})
+      ch_config = ChConnect::Config.new(
+        host: config[:host] || "localhost",
+        tcp_port: config[:tcp_port] || 9000,
+        transport: :native,
+        username: config[:username] || "default",
+        password: config[:password] || "default"
+      )
+      @connection = ChConnect::Connection.new(ch_config)
+    end
+
+    def name = :ch_connect_tcp
+    def execute(sql) = @connection.query(sql)
+    def result_to_array(result) = result.to_a
+    def result_row_count(result) = result.rows.size
+  end
+
   # Adapter for click_house gem (shlima) - JSON format, Faraday
   class ClickHouseAdapter
     def initialize(config = {})

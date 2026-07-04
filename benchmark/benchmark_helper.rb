@@ -12,6 +12,31 @@ module BenchmarkHelper
     password: "default"
   }.freeze
 
+  # Shared scenario queries
+  SMALL_QUERY = "SELECT number FROM system.numbers LIMIT 10"
+
+  BIG_QUERY = <<~SQL.strip
+    SELECT
+      number AS id,
+      toUInt8(number % 256) AS uint8_col,
+      toUInt32(number) AS uint32_col,
+      toFloat64(number / 1000.0) AS float64_col,
+      toString(number) AS string_col,
+      toDate('2024-01-01') + number AS date_col,
+      toDateTime('2024-01-01') + number AS datetime_col,
+      [number, number+1, number+2] AS array_col
+    FROM system.numbers
+    LIMIT 100000
+  SQL
+
+  # Builds a ChConnect connection from the shared CONFIG.
+  # Requires "ch_connect" to be loaded by the caller.
+  def self.ch_connect_connection(transport: :http, **overrides)
+    params = CONFIG.merge(overrides)
+    params[:transport] = :native if transport == :native
+    ChConnect::Connection.new(ChConnect::Config.new(params))
+  end
+
   # Run benchmark-ips comparison
   def self.run_ips(title, adapters:, warmup: 2, time: 5)
     puts "\n" + "=" * 60
