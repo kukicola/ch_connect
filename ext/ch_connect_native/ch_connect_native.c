@@ -453,7 +453,6 @@ find_unsupported_type(const chc_type *t, size_t *out_len)
 typedef struct {
     chc_async_client *ac;
     chc_alloc alloc;
-    int compression; /* chc_compression; pins network_compression_method */
     int broken;
     /* set while a handshake or query is being pumped; still set at the next
      * checkout means the pump was abandoned mid-stream (e.g. Thread#kill)
@@ -522,7 +521,6 @@ native_client_initialize(VALUE self, VALUE database, VALUE username, VALUE passw
     Check_Type(password, T_STRING);
 
     nc->alloc = chc_alloc_stdlib();
-    nc->compression = NUM2INT(compression);
     /* init copies the strings and performs no I/O */
     chc_client_opts opts = {
         .client_name = "ch_connect",
@@ -613,33 +611,24 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
 
     if (!NIL_P(settings)) Check_Type(settings, T_ARRAY);
     long n_settings = NIL_P(settings) ? 0 : RARRAY_LEN(settings);
-    chc_query_setting *csettings = ALLOCA_N(chc_query_setting, n_settings + 2);
-    long n_fixed = 0;
-    csettings[n_fixed++] = (chc_query_setting){
+    chc_query_setting *csettings = ALLOCA_N(chc_query_setting, n_settings + 1);
+    long n_total = 0;
+    /* decoder invariant: the wire must carry printable type names */
+    csettings[n_total++] = (chc_query_setting){
         .name = "output_format_native_encode_types_in_binary_format", .value = "0"
     };
-    /* the protocol's compression flag is boolean; the server picks the
-     * response codec from network_compression_method — pin it to the codec
-     * we registered so a server-side default can't pick one this build
-     * lacks (user settings come later and may still override) */
-    if (nc->compression == CHC_COMP_LZ4 || nc->compression == CHC_COMP_ZSTD) {
-        csettings[n_fixed++] = (chc_query_setting){
-            .name = "network_compression_method",
-            .value = (nc->compression == CHC_COMP_LZ4) ? "lz4" : "zstd"
-        };
-    }
     for (long i = 0; i < n_settings; i++) {
         VALUE pair = RARRAY_AREF(settings, i);
         VALUE sname = rb_ary_entry(pair, 0);
         VALUE sval = rb_ary_entry(pair, 1);
-        csettings[n_fixed + i] = (chc_query_setting){
+        csettings[n_total++] = (chc_query_setting){
             .name = StringValueCStr(sname), .value = StringValueCStr(sval)
         };
         rb_ary_push(flat, sname);
         rb_ary_push(flat, sval);
     }
 
-    chc_query_opts qopts = { .settings = csettings, .n_settings = (size_t)(n_fixed + n_settings) };
+    chc_query_opts qopts = { .settings = csettings, .n_settings = (size_t)n_total };
 
     chc_query_param *cparams = NULL;
     long n_params = 0;

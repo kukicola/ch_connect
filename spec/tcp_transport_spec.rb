@@ -75,6 +75,21 @@ RSpec.describe ChConnect::TcpTransport do
       expect(rows_with(:lz4)).to eq(plain)
       expect(rows_with(:zstd)).to eq(plain) if ChConnect::NativeClient::ZSTD_AVAILABLE
     end
+
+    it "allows overriding network_compression_method to an available codec" do
+      skip "zstd not built" unless ChConnect::NativeClient::ZSTD_AVAILABLE
+
+      response = transport.query("SELECT 1 AS one", settings: {network_compression_method: "zstd"})
+      expect(response.rows).to eq([[1]])
+    end
+
+    it "rejects a network_compression_method override this build cannot decode" do
+      stub_const("ChConnect::NativeClient::ZSTD_AVAILABLE", false)
+
+      expect {
+        transport.query("SELECT 1", settings: {network_compression_method: "zstd"})
+      }.to raise_error(ChConnect::Error, /not decodable by this build/)
+    end
   end
 
   describe "timeouts" do

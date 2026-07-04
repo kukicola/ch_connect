@@ -55,7 +55,9 @@ module ChConnect
       ensure
         # a non-local exit (Thread#kill, Interrupt, Timeout) skips the rescues
         # above but leaves the client mid-stream; close immediately instead of
-        # waiting for this slot's next checkout
+        # waiting for this slot's next checkout. The rescue discards above are
+        # belt-and-suspenders over this — after them @client is nil and this
+        # check is a no-op.
         discard if @client&.broken?
       end
 
@@ -92,14 +94,9 @@ module ChConnect
           wrapped = @config.ssl ? tls_wrap(socket) : socket
         ensure
           # a failed TLS handshake would otherwise leak the raw socket:
-          # @socket is not assigned yet, so discard has nothing to close
-          if wrapped.nil?
-            begin
-              socket.close
-            rescue IOError, SystemCallError
-              nil
-            end
-          end
+          # @socket is not assigned yet, so discard has nothing to close.
+          # (ensure, not rescue: Thread#kill / Timeout skip rescue clauses)
+          safe_close(socket) if wrapped.nil?
         end
         wrapped
       end
@@ -178,14 +175,16 @@ module ChConnect
       end
 
       def discard
-        begin
-          @socket&.close
-        rescue IOError, SystemCallError
-          nil
-        end
+        safe_close(@socket)
         @client&.close
         @socket = nil
         @client = nil
+      end
+
+      def safe_close(io)
+        io&.close
+      rescue IOError, SystemCallError
+        nil
       end
     end
 
@@ -196,6 +195,8 @@ module ChConnect
       @config = config
       load_native_extension
       compression_code = validate_compression!
+      @codec_name = (compression_code == 0) ? nil : config.compression.to_s
+      @codec_pin = @codec_name && ["network_compression_method", @codec_name].freeze
       @pool = ConnectionPool.new(size: config.pool_size, timeout: config.pool_timeout) do
         Slot.new(config, compression_code)
       end
@@ -278,18 +279,38 @@ module ChConnect
       "'#{value.to_s.gsub(/['\\]/) { |c| "\\#{c}" }}'"
     end
 
-    # Settings travel as name/value strings in the Query packet.
-    def format_settings(settings)
-      return nil if settings.nil? || settings.empty?
+    # Settings travel as name/value strings in the Query packet. The wire's
+    # compression flag is boolean and the server picks the response codec
+    # from network_compression_method, so when compression is on we pin it
+    # to the registered codec; an explicit user override must name a codec
+    # this build can decode.
+    def format_settings(user_settings)
+      settings = []
+      settings << @codec_pin if @codec_pin
 
-      settings.map do |key, value|
+      user_settings&.each do |key, value|
+        name = key.to_s
         formatted = case value
         when true then "1"
         when false then "0"
         else value.to_s
         end
-        [key.to_s, formatted]
+        validate_codec_override!(formatted) if name == "network_compression_method"
+        settings << [name, formatted]
       end
+
+      settings.empty? ? nil : settings
+    end
+
+    def validate_codec_override!(codec)
+      return unless @codec_name # compression off: responses are uncompressed anyway
+
+      available = []
+      available << "lz4" if NativeClient::LZ4_AVAILABLE
+      available << "zstd" if NativeClient::ZSTD_AVAILABLE
+      return if available.include?(codec.downcase)
+
+      raise Error, "network_compression_method #{codec.inspect} is not decodable by this build (available: #{available.join(", ")})"
     end
   end
 end

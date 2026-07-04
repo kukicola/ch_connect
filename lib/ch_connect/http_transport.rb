@@ -58,8 +58,8 @@ module ChConnect
     # @raise [QueryError] if the query fails
     def execute(sql, options = {})
       query_params = {database: @config.database}
-        .merge(options[:settings] || {})
-        .merge(options[:params] || {})
+      query_params.merge!(options[:settings]) if options[:settings]
+      query_params.merge!(options[:params]) if options[:params]
       response = @http_client.post(@base_url, params: query_params, body: sql, headers: @default_headers)
 
       # ErrorResponse = no HTTP exchange happened (connect/timeout failures);
