@@ -5,6 +5,7 @@ require_relative "ch_connect/null_instrumenter"
 require_relative "ch_connect/config"
 require_relative "ch_connect/transport_result"
 require_relative "ch_connect/http_transport"
+require_relative "ch_connect/tcp_transport"
 require_relative "ch_connect/connection"
 require_relative "ch_connect/response"
 require_relative "ch_connect/body_reader"
@@ -21,15 +22,20 @@ require_relative "ch_connect/native_format_parser"
 #   conn = ChConnect::Connection.new
 #   response = conn.query("SELECT 1")
 #
-# @example Using connection pool
-#   pool = ChConnect::Pool.new
-#   response = pool.query("SELECT * FROM users")
+# @example Native TCP transport
+#   ChConnect.configure do |config|
+#     config.transport = :native
+#     config.tcp_port = 9000
+#   end
 module ChConnect
   # Base error class for all ChConnect errors
   class Error < StandardError; end
 
   # Raised when a query fails (syntax error, unknown table, etc.)
   class QueryError < Error; end
+
+  # Raised on network/connection failures (retryable)
+  class ConnectionError < Error; end
 
   # Raised when encountering an unsupported ClickHouse data type
   class UnsupportedTypeError < Error; end

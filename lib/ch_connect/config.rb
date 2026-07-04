@@ -13,9 +13,15 @@ module ChConnect
   #   config.url = "http://user:pass@localhost:8123/mydb"
   class Config
     DEFAULTS = {
+      transport: :http,
       scheme: "http",
       host: "localhost",
       port: 8123,
+      tcp_port: 9000,
+      compression: :lz4,
+      ssl: false,
+      ssl_verify: true,
+      ssl_ca: nil,
       database: "default",
       username: "",
       password: "",
@@ -43,7 +49,13 @@ module ChConnect
     # @return [Integer] Pool checkout timeout in seconds
     # @return [Integer] Max retry attempts on connection errors
     # @return [#instrument] Instrumenter for query instrumentation
-    attr_accessor :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    # @return [Symbol] Transport to use: :http (default) or :native (TCP protocol, requires compiled extension)
+    # @return [Integer] Native TCP protocol port (used when transport is :native)
+    # @return [Symbol, nil] Block compression for :native transport: :lz4 (default), :zstd or nil
+    # @return [Boolean] Use TLS for the :native transport (default: false)
+    # @return [Boolean] Verify the server certificate when ssl is enabled (default: true)
+    # @return [String, nil] Path to a CA certificate file for TLS verification (default: system CA store)
+    attr_accessor :transport, :tcp_port, :compression, :ssl, :ssl_verify, :ssl_ca, :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
 
     # Creates a new configuration instance.
     #

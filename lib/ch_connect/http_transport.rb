@@ -36,22 +36,41 @@ module ChConnect
       }
     end
 
+    # Executes a SQL query and parses the Native format response.
+    #
+    # @param sql [String] SQL query to execute
+    # @param options [Hash] query options
+    # @option options [Hash] :params query parameters
+    # @return [Response] fully parsed response
+    # @raise [QueryError] if the query fails
+    def query(sql, options = {})
+      result = execute(sql, options)
+      NativeFormatParser.new(result.body).parse.with(summary: result.summary)
+    end
+
     # Executes a SQL query via HTTP.
     #
     # @param sql [String] SQL query to execute
     # @param options [Hash] query options
     # @option options [Hash] :params query parameters
+    # @option options [Hash] :settings per-query ClickHouse settings (sent as URL parameters)
     # @return [TransportResult] result containing body and summary
     # @raise [QueryError] if the query fails
     def execute(sql, options = {})
-      query_params = {database: @config.database}.merge(options[:params] || {})
+      query_params = {database: @config.database}
+        .merge(options[:settings] || {})
+        .merge(options[:params] || {})
       response = @http_client.post(@base_url, params: query_params, body: sql, headers: @default_headers)
 
-      raise QueryError, response.error.message if response.error
+      # ErrorResponse = no HTTP exchange happened (connect/timeout failures);
+      # an HTTP error status is a server-side query error instead
+      raise ConnectionError, response.error.message if response.is_a?(HTTPX::ErrorResponse)
+
+      # status check must come first: error responses (e.g. auth failures)
+      # may not carry the x-clickhouse-summary header
+      raise QueryError, response.body.to_s unless response.status == 200
 
       summary = JSON.parse(response.headers["x-clickhouse-summary"], symbolize_names: true)
-
-      raise QueryError, response.body.to_s unless response.status == 200
 
       TransportResult.new(body: response.body, summary: summary)
     end

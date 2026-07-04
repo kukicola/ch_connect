@@ -12,7 +12,7 @@ Gem::Specification.new do |spec|
   spec.description = "Fast Ruby client for ClickHouse database using the Native binary format for efficient data transfer"
   spec.homepage = "https://github.com/kukicola/ch_connect"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.1.0"
+  spec.required_ruby_version = ">= 3.2.0"
 
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
@@ -24,7 +24,9 @@ Gem::Specification.new do |spec|
     end
   end
   spec.require_paths = ["lib"]
+  spec.extensions = ["ext/ch_connect_native/extconf.rb"]
 
   spec.add_dependency "bigdecimal", "~> 3.1"
+  spec.add_dependency "connection_pool", "~> 2.4"
   spec.add_dependency "httpx", "~> 1.0"
 end

@@ -15,7 +15,7 @@ module ChConnect
     # @param config [Config] configuration instance (defaults to global config)
     def initialize(config = ChConnect.config)
       @config = config
-      @transport = HttpTransport.new(config)
+      @transport = (config.transport == :native) ? TcpTransport.new(config) : HttpTransport.new(config)
     end
 
     # Executes a SQL query and returns the response.
@@ -27,8 +27,7 @@ module ChConnect
     # @raise [QueryError] if the query fails
     def query(sql, options = {})
       @config.instrumenter.instrument("query.clickhouse", {sql: sql}) do
-        result = @transport.execute(sql, options)
-        NativeFormatParser.new(result.body).parse.with(summary: result.summary)
+        @transport.query(sql, options)
       end
     end
   end
