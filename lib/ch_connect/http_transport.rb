@@ -36,27 +36,15 @@ module ChConnect
       }
     end
 
-    # Executes a SQL query and parses the Native format response.
-    #
-    # @param sql [String] SQL query to execute
-    # @param options [Hash] query options
-    # @option options [Hash] :params query parameters
-    # @return [Response] fully parsed response
-    # @raise [QueryError] if the query fails
-    def query(sql, options = {})
-      result = execute(sql, options)
-      NativeFormatParser.new(result.body).parse.with(summary: result.summary)
-    end
-
-    # Executes a SQL query via HTTP.
+    # Executes a SQL query via HTTP and parses the Native format response.
     #
     # @param sql [String] SQL query to execute
     # @param options [Hash] query options
     # @option options [Hash] :params query parameters
     # @option options [Hash] :settings per-query ClickHouse settings (sent as URL parameters)
-    # @return [TransportResult] result containing body and summary
+    # @return [Response] fully parsed response
     # @raise [QueryError] if the query fails
-    def execute(sql, options = {})
+    def query(sql, options = {})
       query_params = {database: @config.database}
       query_params.merge!(options[:settings]) if options[:settings]
       query_params.merge!(options[:params]) if options[:params]
@@ -72,7 +60,7 @@ module ChConnect
 
       summary = JSON.parse(response.headers["x-clickhouse-summary"], symbolize_names: true)
 
-      TransportResult.new(body: response.body, summary: summary)
+      NativeFormatParser.new(response.body).parse.with(summary: summary)
     end
   end
 end

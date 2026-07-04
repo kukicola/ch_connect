@@ -41,9 +41,6 @@ bundle exec ruby scenarios/big_queries.rb
 bundle exec ruby scenarios/threaded.rb
 ```
 
-There is also `scenarios/tcp_vs_http.rb`, a standalone ch_connect-only
-comparison of the two transports (run from the repo root with plain `ruby`).
-
 ## Scenarios
 
 ### Scenario 1: Small Query

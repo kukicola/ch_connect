@@ -3,7 +3,6 @@
 require_relative "ch_connect/version"
 require_relative "ch_connect/null_instrumenter"
 require_relative "ch_connect/config"
-require_relative "ch_connect/transport_result"
 require_relative "ch_connect/http_transport"
 require_relative "ch_connect/tcp_transport"
 require_relative "ch_connect/connection"

@@ -4,18 +4,19 @@ RSpec.describe ChConnect::HttpTransport do
   let(:config) { ChConnect.config }
   let(:transport) { described_class.new(config) }
 
-  describe "#execute" do
-    it "returns TransportResult for valid query" do
-      result = transport.execute("SELECT 1")
+  describe "#query" do
+    it "returns a parsed Response for valid query" do
+      response = transport.query("SELECT 1 AS one")
 
-      expect(result).to be_a(ChConnect::TransportResult)
-      expect(result.summary).to be_a(Hash)
-      expect(result.body).not_to be_nil
+      expect(response).to be_a(ChConnect::Response)
+      expect(response.columns).to eq([:one])
+      expect(response.rows).to eq([[1]])
+      expect(response.summary).to be_a(Hash)
     end
 
     it "raises QueryError for invalid query" do
       expect {
-        transport.execute("INVALID SQL SYNTAX")
+        transport.query("INVALID SQL SYNTAX")
       }.to raise_error(ChConnect::QueryError, /Syntax error/)
     end
 
@@ -26,7 +27,7 @@ RSpec.describe ChConnect::HttpTransport do
       )
 
       expect {
-        described_class.new(bad_config).execute("SELECT 1")
+        described_class.new(bad_config).query("SELECT 1")
       }.to raise_error(ChConnect::QueryError, /[Aa]uthentication|password/)
     end
   end
