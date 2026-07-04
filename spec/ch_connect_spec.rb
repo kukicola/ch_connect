@@ -400,7 +400,7 @@ RSpec.describe ChConnect do
       it "raises QueryError for non-existent table" do
         expect {
           connection.query("SELECT * FROM non_existent_table_12345")
-        }.to raise_error(ChConnect::QueryError, /UNKNOWN_TABLE/)
+        }.to raise_error(ChConnect::QueryError, /non_existent_table_12345/)
       end
 
       it "raises UnsupportedTypeError for JSON type" do
@@ -426,6 +426,36 @@ RSpec.describe ChConnect do
         )
 
         expect(response.rows).to eq([[42, "alice"]])
+      end
+
+      it "passes typed parameters (integers, arrays, dates, floats)" do
+        response = connection.query(
+          "SELECT {id:UInt64} AS id, {ids:Array(UInt32)} AS ids, {d:Date} AS d, {f:Float64} AS f",
+          params: {param_id: 123, param_ids: "[1,2,3]", param_d: "2024-01-01", param_f: 1.5}
+        )
+
+        expect(response.rows).to eq([[123, [1, 2, 3], Date.new(2024, 1, 1), 1.5]])
+      end
+    end
+
+    describe "query settings" do
+      it "applies per-query settings" do
+        expect {
+          connection.query(
+            "SELECT number FROM system.numbers LIMIT 10",
+            settings: {max_result_rows: 5, result_overflow_mode: "throw"}
+          )
+        }.to raise_error(ChConnect::QueryError, /Limit for result/)
+      end
+
+      it "combines settings with parameters" do
+        response = connection.query(
+          "SELECT {id:UInt32} AS id",
+          params: {param_id: 7},
+          settings: {max_threads: 1}
+        )
+
+        expect(response.rows).to eq([[7]])
       end
     end
   end

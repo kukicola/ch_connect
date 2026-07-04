@@ -1,3 +1,8 @@
 # For available configuration options, see:
 #   https://github.com/standardrb/standard
 ruby_version: 3.4
+
+ignore:
+  # mkmf's API is built on global variables ($INCFLAGS, $LDFLAGS, $defs)
+  - "ext/**/extconf.rb":
+      - Style/GlobalVars

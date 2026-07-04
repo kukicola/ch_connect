@@ -1,0 +1,260 @@
+# frozen_string_literal: true
+
+RSpec.describe ChConnect::TcpTransport do
+  let(:config) do
+    ChConnect::Config.new(
+      host: ChConnect.config.host,
+      tcp_port: ChConnect.config.tcp_port,
+      database: ChConnect.config.database,
+      username: ChConnect.config.username,
+      password: ChConnect.config.password,
+      transport: :native
+    )
+  end
+  let(:transport) { described_class.new(config) }
+
+  after { transport.close }
+
+  describe "#query" do
+    it "returns a Response for valid query" do
+      response = transport.query("SELECT 1 AS one")
+
+      expect(response).to be_a(ChConnect::Response)
+      expect(response.columns).to eq([:one])
+      expect(response.rows).to eq([[1]])
+      expect(response.summary).to be_a(Hash)
+    end
+
+    it "raises QueryError for invalid query" do
+      expect {
+        transport.query("INVALID SQL SYNTAX")
+      }.to raise_error(ChConnect::QueryError, /Syntax error/)
+    end
+
+    it "recovers the pooled connection after a server error" do
+      expect { transport.query("SELECT bad_column FROM system.one") }
+        .to raise_error(ChConnect::QueryError)
+
+      expect(transport.query("SELECT 2 AS two").rows).to eq([[2]])
+    end
+
+    it "serves concurrent queries correctly" do
+      results = Array.new(8)
+      threads = 8.times.map do |i|
+        Thread.new do
+          results[i] = transport.query("SELECT #{i} AS n, sum(number) AS s FROM numbers(#{10 + i})").rows
+        end
+      end
+      threads.each(&:join)
+
+      8.times do |i|
+        expected_sum = (9 + i) * (10 + i) / 2
+        expect(results[i]).to eq([[i, expected_sum]])
+      end
+    end
+  end
+
+  describe "compression" do
+    let(:typed_query) { "SELECT number, toString(number) AS s, toDate('2024-01-01') + number AS d, [number, number + 1] AS a FROM system.numbers LIMIT 1000" }
+
+    def rows_with(compression)
+      alt_config = ChConnect::Config.new(
+        host: config.host, tcp_port: config.tcp_port,
+        username: config.username, password: config.password,
+        transport: :native, compression: compression
+      )
+      alt = described_class.new(alt_config)
+      alt.query(typed_query).rows
+    ensure
+      alt&.close
+    end
+
+    it "returns identical rows with lz4, zstd and no compression" do
+      plain = rows_with(nil)
+
+      expect(rows_with(:lz4)).to eq(plain)
+      expect(rows_with(:zstd)).to eq(plain) if ChConnect::NativeClient::ZSTD_AVAILABLE
+    end
+  end
+
+  describe "timeouts" do
+    it "times out when the server accepts but never responds" do
+      silent_server = TCPServer.new("127.0.0.1", 0)
+      port = silent_server.addr[1]
+      accepter = Thread.new { silent_server.accept }
+
+      silent_config = ChConnect::Config.new(
+        host: "127.0.0.1", tcp_port: port, transport: :native,
+        connection_timeout: 0.5, max_retries: 0
+      )
+      silent_transport = described_class.new(silent_config)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      expect { silent_transport.query("SELECT 1") }
+        .to raise_error(ChConnect::ConnectionError, /read timeout/)
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 5
+    ensure
+      silent_transport&.close
+      accepter&.kill
+      silent_server&.close
+    end
+
+    it "times out connecting to an unroutable address" do
+      dead_config = ChConnect::Config.new(
+        host: "10.255.255.1", tcp_port: 9000, transport: :native,
+        connection_timeout: 0.5, max_retries: 0
+      )
+      dead_transport = described_class.new(dead_config)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      expect { dead_transport.query("SELECT 1") }.to raise_error(ChConnect::ConnectionError)
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 5
+    ensure
+      dead_transport&.close
+    end
+  end
+
+  describe "retries" do
+    let(:retry_config) do
+      ChConnect::Config.new(
+        host: config.host, tcp_port: config.tcp_port,
+        username: config.username, password: config.password,
+        transport: :native, max_retries: 3
+      )
+    end
+
+    before do
+      # ensure the extension (and thus the NativeClient constant) is loaded
+      # through the public path before stubbing it
+      described_class.new(retry_config).close
+    end
+
+    def fake_client
+      double("NativeClient", close: nil, broken?: false,
+        handshake_step: :done, take_output: nil, feed: nil, recv_step: :done)
+    end
+
+    it "retries on ConnectionError and succeeds" do
+      calls = 0
+      fake = fake_client
+      allow(fake).to receive(:send_query) do
+        calls += 1
+        raise ChConnect::ConnectionError, "boom" if calls < 3
+      end
+      allow(fake).to receive(:take_result).and_return([[:one], [:UInt8], [[1]], {}])
+      allow(ChConnect::NativeClient).to receive(:new).and_return(fake)
+
+      expect(described_class.new(retry_config).query("SELECT 1").rows).to eq([[1]])
+      expect(calls).to eq(3)
+    end
+
+    it "gives up after max_retries" do
+      fake = fake_client
+      allow(fake).to receive(:send_query).and_raise(ChConnect::ConnectionError, "down")
+      allow(ChConnect::NativeClient).to receive(:new).and_return(fake)
+
+      expect { described_class.new(retry_config).query("SELECT 1") }
+        .to raise_error(ChConnect::ConnectionError, "down")
+      expect(fake).to have_received(:send_query).exactly(4).times # initial + 3 retries
+    end
+  end
+
+  describe "interrupt handling" do
+    it "recovers after a query thread is killed mid-query" do
+      # note: the query must actually use the sleep column — the optimizer
+      # prunes unused sleepEachRow calls and the query returns instantly
+      worker = Thread.new do
+        transport.query("SELECT sleep(3)")
+      end
+      sleep 0.5 # let the query get in flight
+      worker.kill
+      worker.join
+
+      expect(transport.query("SELECT 41 + 1 AS x").rows).to eq([[42]])
+    end
+
+    it "does not hold the GVL while waiting on the server" do
+      ticks = 0
+      ticker = Thread.new do
+        loop do
+          ticks += 1
+          sleep 0.01
+        end
+      end
+
+      transport.query("SELECT sleep(1)")
+      ticker.kill
+      ticker.join
+
+      # ~100 expected with the GVL released; near zero if the C call held it
+      expect(ticks).to be > 30
+    end
+  end
+
+  describe "TLS", if: ENV["CH_TLS_PORT"] do
+    it "queries over TLS with CA verification" do
+      tls_config = ChConnect::Config.new(
+        host: config.host, tcp_port: Integer(ENV["CH_TLS_PORT"]),
+        username: config.username, password: config.password,
+        transport: :native, ssl: true, ssl_verify: true, ssl_ca: ENV.fetch("CH_TLS_CA")
+      )
+      tls_transport = described_class.new(tls_config)
+
+      expect(tls_transport.query("SELECT 1 AS one").rows).to eq([[1]])
+    ensure
+      tls_transport&.close
+    end
+
+    it "rejects an unverifiable certificate against the system store" do
+      tls_config = ChConnect::Config.new(
+        host: config.host, tcp_port: Integer(ENV["CH_TLS_PORT"]),
+        username: config.username, password: config.password,
+        transport: :native, ssl: true, ssl_verify: true, max_retries: 0
+      )
+      tls_transport = described_class.new(tls_config)
+
+      expect { tls_transport.query("SELECT 1") }
+        .to raise_error(ChConnect::ConnectionError, /certificate verify/)
+    ensure
+      tls_transport&.close
+    end
+  end
+
+  describe "URL-based configuration" do
+    it "handles a URL without credentials" do
+      url_config = ChConnect::Config.new(transport: :native, tcp_port: config.tcp_port)
+      url_config.url = "http://#{config.host}:8123/default"
+      url_transport = described_class.new(url_config)
+
+      # must not crash on nil credentials; auth outcome depends on the server
+      expect {
+        begin
+          url_transport.query("SELECT 1")
+        rescue ChConnect::Error
+          nil
+        end
+      }.not_to raise_error
+    ensure
+      url_transport&.close
+    end
+  end
+
+  describe "parameter formatting" do
+    it "quotes string values and strips the param_ prefix" do
+      expect(transport.send(:format_params, {param_name: "al'ice"})).to eq([["name", "'al\\'ice'"]])
+    end
+
+    it "quotes numeric values as strings" do
+      expect(transport.send(:format_params, {param_id: 42})).to eq([["id", "'42'"]])
+    end
+
+    it "converts nil to NULL" do
+      expect(transport.send(:format_params, {param_x: nil})).to eq([["x", "NULL"]])
+    end
+
+    it "returns nil for empty params" do
+      expect(transport.send(:format_params, nil)).to be_nil
+      expect(transport.send(:format_params, {})).to be_nil
+    end
+  end
+end

@@ -18,5 +18,16 @@ RSpec.describe ChConnect::HttpTransport do
         transport.execute("INVALID SQL SYNTAX")
       }.to raise_error(ChConnect::QueryError, /Syntax error/)
     end
+
+    it "raises QueryError for auth failures (no summary header in response)" do
+      bad_config = ChConnect::Config.new(
+        host: config.host, port: config.port,
+        username: "default", password: "definitely-wrong-password"
+      )
+
+      expect {
+        described_class.new(bad_config).execute("SELECT 1")
+      }.to raise_error(ChConnect::QueryError, /[Aa]uthentication|password/)
+    end
   end
 end
