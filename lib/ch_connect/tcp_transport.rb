@@ -37,6 +37,7 @@ module ChConnect
       def query(sql, params, settings)
         ensure_connected
 
+        started_at = monotonic_now
         @client.send_query(sql, params, settings)
         flush_output
         loop do
@@ -45,7 +46,9 @@ module ChConnect
           when :want_read then @client.feed(read_chunk)
           end
         end
-        @client.take_result
+        result = @client.take_result
+        result.last[:elapsed_ns] = ((monotonic_now - started_at) * 1_000_000_000).to_i.to_s
+        result
       rescue IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
         discard
         raise ConnectionError, "#{e.class}: #{e.message}"
@@ -145,8 +148,25 @@ module ChConnect
       end
 
       def flush_output
+        deadline = monotonic_now + @config.write_timeout if @config.write_timeout
         while (out = @client.take_output)
-          @socket.write(out)
+          offset = 0
+          while offset < out.bytesize
+            if deadline && deadline - monotonic_now <= 0
+              raise ConnectionError, "write timeout"
+            end
+
+            chunk = (offset == 0) ? out : out.byteslice(offset, out.bytesize - offset)
+            case (written = @socket.write_nonblock(chunk, exception: false))
+            when :wait_readable, :wait_writable
+              remaining = deadline && (deadline - monotonic_now)
+              wait_or_fail(@socket, written, remaining, "write timeout")
+            else
+              raise ConnectionError, "connection closed while writing" if written == 0
+
+              offset += written
+            end
+          end
         end
       end
 
@@ -280,7 +300,10 @@ module ChConnect
     end
 
     def quote_param(value)
-      return "NULL" if value.nil?
+      # Query parameters use Field::restoreFromDump. Its nullable marker is a
+      # quoted, doubly escaped text NULL, matching ClickHouse's native client
+      # protocol (the dump parser consumes the first escape layer).
+      return "'\\\\N'" if value.nil?
 
       "'#{value.to_s.gsub(/['\\]/) { |c| "\\#{c}" }}'"
     end

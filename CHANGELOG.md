@@ -1,7 +1,8 @@
 ## Unreleased
 
 - Added experimental native TCP protocol transport (`config.transport = :native`) backed by a C extension over vendored [clickhouse-c](https://github.com/ClickHouse/clickhouse-c); the extension is an ioless protocol state machine + block decoder while all socket I/O lives in Ruby (~2x faster large queries, ~35% faster small queries, ~4.5x multi-threaded throughput, ~20% less allocation)
-- Native transport features: connection pooling via `connection_pool`, LZ4/ZSTD block compression (`config.compression`, default `:lz4`), TLS via the openssl stdlib (`config.ssl`, `config.ssl_verify`, `config.ssl_ca`), connect/read timeouts, natively interruptible Ruby socket I/O
+- Native transport features: connection pooling via `connection_pool`, LZ4/ZSTD block compression (`config.compression`, default `:lz4`), TLS via the openssl stdlib (`config.ssl`, `config.ssl_verify`, `config.ssl_ca`), connect/read/write timeouts, natively interruptible Ruby socket I/O
+- Native URL schemes (`clickhouse://`, `clickhouses://`, `tcp://`, `tcps://`) configure transport, TCP port, TLS, credentials and database
 - Added per-query ClickHouse settings on both transports: `conn.query(sql, settings: {max_threads: 1})`
 - New config options: `transport`, `tcp_port`, `compression`, `ssl`, `ssl_verify`, `ssl_ca`
 - New dependency: `connection_pool` (~> 2.4)

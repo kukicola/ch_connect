@@ -23,6 +23,7 @@ RSpec.describe ChConnect::TcpTransport do
       expect(response.columns).to eq([:one])
       expect(response.rows).to eq([[1]])
       expect(response.summary).to be_a(Hash)
+      expect(response.summary).to include(:result_rows, :result_bytes, :elapsed_ns)
     end
 
     it "raises QueryError for invalid query" do
@@ -32,10 +33,38 @@ RSpec.describe ChConnect::TcpTransport do
     end
 
     it "recovers the pooled connection after a server error" do
+      transport # load the extension before installing the constructor spy
+      allow(ChConnect::NativeClient).to receive(:new).and_call_original
+
       expect { transport.query("SELECT bad_column FROM system.one") }
         .to raise_error(ChConnect::QueryError)
 
       expect(transport.query("SELECT 2 AS two").rows).to eq([[2]])
+      expect(ChConnect::NativeClient).to have_received(:new).once
+    end
+
+    it "rejects unsupported fixed types before Ruby decoding and recovers" do
+      expect { transport.query("SELECT toBFloat16(1)") }
+        .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
+
+      expect(transport.query("SELECT 42 AS answer").rows).to eq([[42]])
+    end
+
+    it "survives compacting GC while serializing query parameters" do
+      skip "GC compaction is unavailable" unless GC.respond_to?(:auto_compact=)
+
+      params = 16.times.to_h { |i| ["param_unused_#{i}", "value-#{i}"] }
+      params[:param_target] = "safe"
+      previous_stress = GC.stress
+      previous_auto_compact = GC.auto_compact
+      GC.auto_compact = true
+      GC.stress = true
+
+      expect(transport.query("SELECT {target:String} AS target", params: params).rows)
+        .to eq([["safe"]])
+    ensure
+      GC.stress = previous_stress unless previous_stress.nil?
+      GC.auto_compact = previous_auto_compact unless previous_auto_compact.nil?
     end
 
     it "serves concurrent queries correctly" do
@@ -109,6 +138,38 @@ RSpec.describe ChConnect::TcpTransport do
   end
 
   describe "timeouts" do
+    it "writes all output through partial nonblocking writes" do
+      slot = described_class::Slot.allocate
+      client = double("NativeClient")
+      socket = double("Socket")
+      config = double("Config", write_timeout: 5.0)
+
+      slot.instance_variable_set(:@client, client)
+      slot.instance_variable_set(:@socket, socket)
+      slot.instance_variable_set(:@config, config)
+      allow(client).to receive(:take_output).and_return("abc", nil)
+      allow(slot).to receive(:monotonic_now).and_return(10.0)
+      expect(socket).to receive(:write_nonblock).with("abc", exception: false).and_return(1)
+      expect(socket).to receive(:write_nonblock).with("bc", exception: false).and_return(2)
+
+      slot.send(:flush_output)
+    end
+
+    it "bounds native writes by write_timeout" do
+      slot = described_class::Slot.allocate
+      client = double("NativeClient", take_output: "blocked")
+      socket = double("Socket", write_nonblock: :wait_writable)
+      config = double("Config", write_timeout: 5.0)
+
+      slot.instance_variable_set(:@client, client)
+      slot.instance_variable_set(:@socket, socket)
+      slot.instance_variable_set(:@config, config)
+      allow(slot).to receive(:monotonic_now).and_return(10.0, 15.0)
+
+      expect { slot.send(:flush_output) }
+        .to raise_error(ChConnect::ConnectionError, "write timeout")
+    end
+
     it "uses one connection timeout budget for the full native handshake" do
       slot = described_class::Slot.allocate
       client = double("NativeClient", handshake_step: nil, feed: nil)
@@ -287,7 +348,7 @@ RSpec.describe ChConnect::TcpTransport do
   describe "URL-based configuration" do
     it "handles a URL without credentials" do
       url_config = ChConnect::Config.new(transport: :native, tcp_port: config.tcp_port)
-      url_config.url = "http://#{config.host}:8123/default"
+      url_config.url = "clickhouse://#{config.host}:#{config.tcp_port}/default"
       url_transport = described_class.new(url_config)
 
       # must not crash on nil credentials; auth outcome depends on the server
@@ -312,8 +373,8 @@ RSpec.describe ChConnect::TcpTransport do
       expect(transport.send(:format_params, {param_id: 42})).to eq([["id", "'42'"]])
     end
 
-    it "converts nil to NULL" do
-      expect(transport.send(:format_params, {param_x: nil})).to eq([["x", "NULL"]])
+    it "converts nil to the native nullable dump marker" do
+      expect(transport.send(:format_params, {param_x: nil})).to eq([["x", "'\\\\N'"]])
     end
 
     it "returns nil for empty params" do

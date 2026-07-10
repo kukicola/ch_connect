@@ -47,7 +47,7 @@ module ChConnect
     def query(sql, options = {})
       query_params = {database: @config.database}
       query_params.merge!(options[:settings]) if options[:settings]
-      query_params.merge!(options[:params]) if options[:params]
+      query_params.merge!(format_params(options[:params])) if options[:params]
       response = @http_client.post(@base_url, params: query_params, body: sql, headers: @default_headers)
 
       # ErrorResponse = no HTTP exchange happened (connect/timeout failures);
@@ -61,6 +61,15 @@ module ChConnect
       summary = JSON.parse(response.headers["x-clickhouse-summary"], symbolize_names: true)
 
       NativeFormatParser.new(response.body).parse.with(summary: summary)
+    end
+
+    private
+
+    # HTTP query parameters use ClickHouse's escaped-text representation,
+    # where \N is the NULL marker. Native TCP wraps and escapes that marker
+    # for Field::restoreFromDump instead.
+    def format_params(params)
+      params.to_h { |key, value| [key, value.nil? ? "\\N" : value] }
     end
   end
 end

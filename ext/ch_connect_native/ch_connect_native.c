@@ -35,6 +35,8 @@ static VALUE eConnectionError;
 static VALUE eUnsupportedTypeError;
 static VALUE cIPAddr;
 static VALUE cDate;
+static VALUE vAF_INET;
+static VALUE vAF_INET6;
 
 static ID id_jd;
 static ID id_new;
@@ -48,6 +50,7 @@ static VALUE sym_written_rows;
 static VALUE sym_written_bytes;
 static VALUE sym_total_rows_to_read;
 static VALUE sym_result_rows;
+static VALUE sym_result_bytes;
 static VALUE sym_done;
 static VALUE sym_want_read;
 
@@ -62,15 +65,16 @@ static chc_codec g_codec;
 
 /* --- column decoding ---------------------------------------------------- */
 
-static VALUE decode_column(const chc_column *col, const chc_type *t, long n_rows);
+static VALUE decode_column(const chc_column *col, const chc_type *t, long n_rows, int *broken);
 
-NORETURN(static void raise_unsupported_type(const chc_type *t));
+NORETURN(static void raise_unsupported_type(const chc_type *t, int *broken));
 
 static void
-raise_unsupported_type(const chc_type *t)
+raise_unsupported_type(const chc_type *t, int *broken)
 {
     size_t len = 0;
     const char *name = chc_type_name(t, &len);
+    *broken = 1;
     rb_raise(eUnsupportedTypeError, "Unsupported column type: %.*s", (int)len, name);
 }
 
@@ -144,7 +148,7 @@ load_f64le(const uint8_t *p)
 
 /* FIXED-layout leaf decoding, dispatched on logical kind */
 static VALUE
-decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
+decode_fixed(const chc_column *col, const chc_type *t, long n_rows, int *broken)
 {
     size_t es = 0;
     const uint8_t *data = (const uint8_t *)chc_column_fixed_data(col, &es);
@@ -299,24 +303,17 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
         break;
     }
     case CHC_IPV4: {
-        char buf[16];
         for (long i = 0; i < n_rows; i++) {
             uint32_t v = load_u32le(data + i * 4);
-            snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-                     (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
-            rb_ary_push(ary, rb_funcall(cIPAddr, id_new, 1, rb_utf8_str_new_cstr(buf)));
+            rb_ary_push(ary, rb_funcall(cIPAddr, id_new, 2, UINT2NUM(v), vAF_INET));
         }
         break;
     }
     case CHC_IPV6: {
-        char buf[40];
         for (long i = 0; i < n_rows; i++) {
             const uint8_t *p = data + i * 16;
-            snprintf(buf, sizeof(buf),
-                     "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
-                     p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
-                     p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
-            rb_ary_push(ary, rb_funcall(cIPAddr, id_new, 1, rb_utf8_str_new_cstr(buf)));
+            VALUE value = rb_integer_unpack(p, 16, 1, 0, INTEGER_PACK_BIG_ENDIAN);
+            rb_ary_push(ary, rb_funcall(cIPAddr, id_new, 2, value, vAF_INET6));
         }
         break;
     }
@@ -346,7 +343,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
         break;
     }
     default:
-        raise_unsupported_type(t);
+        raise_unsupported_type(t, broken);
     }
 
     return ary;
@@ -369,13 +366,13 @@ decode_string_column(const chc_column *col, long n_rows)
 }
 
 static VALUE
-decode_column(const chc_column *col, const chc_type *t, long n_rows)
+decode_column(const chc_column *col, const chc_type *t, long n_rows, int *broken)
 {
     if (n_rows == 0) return rb_ary_new();
 
     switch (chc_column_layout(col)) {
     case CHC_COL_FIXED:
-        return decode_fixed(col, t, n_rows);
+        return decode_fixed(col, t, n_rows, broken);
 
     case CHC_COL_STRING:
         return decode_string_column(col, n_rows);
@@ -384,7 +381,7 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows)
         const uint8_t *null_map = chc_column_null_map(col);
         const chc_column *inner = chc_column_nullable_inner(col);
         const chc_type *inner_t = chc_type_child(t, 0);
-        VALUE vals = decode_column(inner, inner_t, n_rows);
+        VALUE vals = decode_column(inner, inner_t, n_rows, broken);
         for (long i = 0; i < n_rows; i++) {
             if (null_map[i] == 1) rb_ary_store(vals, i, Qnil);
         }
@@ -402,8 +399,8 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows)
             long total = (long)chc_column_n_rows(values_col);
             const chc_column *keys_col = chc_column_tuple_child(values_col, 0);
             const chc_column *vals_col = chc_column_tuple_child(values_col, 1);
-            VALUE keys = decode_column(keys_col, kt, total);
-            VALUE vals = decode_column(vals_col, vt, total);
+            VALUE keys = decode_column(keys_col, kt, total, broken);
+            VALUE vals = decode_column(vals_col, vt, total, broken);
 
             VALUE ary = rb_ary_new_capa(n_rows);
             uint64_t start = 0;
@@ -421,7 +418,7 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows)
 
         const chc_type *elem_t = chc_type_child(t, 0);
         long total = (long)chc_column_n_rows(values_col);
-        VALUE elements = decode_column(values_col, elem_t, total);
+        VALUE elements = decode_column(values_col, elem_t, total, broken);
 
         VALUE ary = rb_ary_new_capa(n_rows);
         uint64_t start = 0;
@@ -438,7 +435,7 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows)
         VALUE children = rb_ary_new_capa((long)arity);
         for (size_t k = 0; k < arity; k++) {
             rb_ary_push(children, decode_column(chc_column_tuple_child(col, k),
-                                                chc_type_child(t, k), n_rows));
+                                                chc_type_child(t, k), n_rows, broken));
         }
         VALUE ary = rb_ary_new_capa(n_rows);
         for (long i = 0; i < n_rows; i++) {
@@ -455,7 +452,7 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows)
         const chc_column *dict = chc_column_lc_dict(col);
         const chc_type *inner_t = chc_type_child(t, 0);
         long dict_size = (long)chc_column_n_rows(dict);
-        VALUE dict_vals = decode_column(dict, inner_t, dict_size);
+        VALUE dict_vals = decode_column(dict, inner_t, dict_size, broken);
 
         int key_size = chc_column_lc_key_size(col);
         const void *keys = chc_column_lc_keys(col);
@@ -480,23 +477,42 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows)
     }
 
     default:
-        raise_unsupported_type(t);
+        raise_unsupported_type(t, broken);
     }
 }
 
-/* Reject types the decoder can't handle before any data block arrives. */
+/* Reject types the Ruby-value decoder can't handle before decoding rows. */
 static const char *
 find_unsupported_type(const chc_type *t, size_t *out_len)
 {
     switch (chc_type_kind(t)) {
-    case CHC_VARIANT:
-    case CHC_DYNAMIC:
-    case CHC_JSON:
-    case CHC_OBJECT:
-    case CHC_AGGREGATE_FUNCTION:
-        return chc_type_name(t, out_len);
-    default:
+    /* Composite kinds supported recursively by decode_column. */
+    case CHC_NULLABLE:
+    case CHC_ARRAY:
+    case CHC_TUPLE:
+    case CHC_MAP:
+    case CHC_LOW_CARDINALITY:
         break;
+
+    /* Fixed and scalar layouts handled by decode_fixed/string/nothing. */
+    case CHC_VOID:
+    case CHC_INT8: case CHC_INT16: case CHC_INT32: case CHC_INT64:
+    case CHC_INT128: case CHC_INT256:
+    case CHC_UINT8: case CHC_UINT16: case CHC_UINT32: case CHC_UINT64:
+    case CHC_UINT128: case CHC_UINT256:
+    case CHC_FLOAT32: case CHC_FLOAT64: case CHC_BOOL:
+    case CHC_DATE: case CHC_DATE32: case CHC_DATETIME: case CHC_DATETIME64:
+    case CHC_STRING: case CHC_FIXED_STRING:
+    case CHC_DECIMAL32: case CHC_DECIMAL64: case CHC_DECIMAL128: case CHC_DECIMAL256:
+    case CHC_UUID: case CHC_IPV4: case CHC_IPV6:
+    case CHC_ENUM8: case CHC_ENUM16: case CHC_INTERVAL: case CHC_NOTHING:
+        return NULL;
+
+    /* Everything else is rejected before Ruby decoding starts. This includes
+     * BFloat16, Time/Time64, Nested, geo types, Variant/Dynamic/JSON/Object,
+     * aggregate states, SimpleAggregateFunction and QBit. */
+    default:
+        return chc_type_name(t, out_len);
     }
     for (size_t i = 0; i < chc_type_n_children(t); i++) {
         const char *bad = find_unsupported_type(chc_type_child(t, i), out_len);
@@ -516,9 +532,11 @@ typedef struct {
      * and the connection is desynced even though no error was recorded */
     int in_flight;
     int have_header;
+    int have_profile;
     /* parked across calls so a raise mid-decode can't leak the block */
     chc_packet pending_pkt;
     uint64_t read_rows, read_bytes, total_rows, written_rows, written_bytes;
+    uint64_t result_rows, result_bytes;
 } native_client_t;
 
 static void
@@ -655,19 +673,49 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
     clear_pending(nc);
     nc->in_flight = 1;
     nc->have_header = 0;
+    nc->have_profile = 0;
     nc->read_rows = nc->read_bytes = nc->total_rows = 0;
     nc->written_rows = nc->written_bytes = 0;
+    nc->result_rows = nc->result_bytes = 0;
     rb_iv_set(self, "@columns", rb_ary_new());
     rb_iv_set(self, "@types", rb_ary_new());
     rb_iv_set(self, "@rows", rb_ary_new());
 
-    /* Sending only appends to the in-memory out sink — no blocking, no GC
-     * while the string pointers are in use, so no copies are needed. The
-     * flat array keeps every coerced string alive until the send returns. */
-    VALUE flat = rb_ary_new();
-
     if (!NIL_P(settings)) Check_Type(settings, T_ARRAY);
     long n_settings = NIL_P(settings) ? 0 : RARRAY_LEN(settings);
+    if (!NIL_P(params)) Check_Type(params, T_ARRAY);
+    long n_params = NIL_P(params) ? 0 : RARRAY_LEN(params);
+
+    /* Coerce and validate every Ruby string before retaining any RSTRING_PTR.
+     * String coercion and rb_ary_push can allocate and trigger compacting GC;
+     * once this pass finishes, the pointer-building pass performs no Ruby
+     * allocation before chc_client_send_query_ex consumes the bytes. */
+    VALUE flat = rb_ary_new_capa(2 * (n_settings + n_params));
+    for (long i = 0; i < n_settings; i++) {
+        VALUE pair = RARRAY_AREF(settings, i);
+        Check_Type(pair, T_ARRAY);
+        VALUE name = rb_ary_entry(pair, 0);
+        VALUE value = rb_ary_entry(pair, 1);
+        StringValue(name);
+        StringValue(value);
+        (void)StringValueCStr(name);  /* reject embedded NUL */
+        (void)StringValueCStr(value);
+        rb_ary_push(flat, name);
+        rb_ary_push(flat, value);
+    }
+    for (long i = 0; i < n_params; i++) {
+        VALUE pair = RARRAY_AREF(params, i);
+        Check_Type(pair, T_ARRAY);
+        VALUE name = rb_ary_entry(pair, 0);
+        VALUE value = rb_ary_entry(pair, 1);
+        StringValue(name);
+        StringValue(value);
+        (void)StringValueCStr(name);
+        (void)StringValueCStr(value);
+        rb_ary_push(flat, name);
+        rb_ary_push(flat, value);
+    }
+
     chc_query_setting *csettings = ALLOCA_N(chc_query_setting, n_settings + 1);
     long n_total = 0;
     /* decoder invariant: the wire must carry printable type names */
@@ -675,37 +723,27 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
         .name = "output_format_native_encode_types_in_binary_format", .value = "0"
     };
     for (long i = 0; i < n_settings; i++) {
-        VALUE pair = RARRAY_AREF(settings, i);
-        VALUE sname = rb_ary_entry(pair, 0);
-        VALUE sval = rb_ary_entry(pair, 1);
+        VALUE sname = RARRAY_AREF(flat, 2 * i);
+        VALUE sval = RARRAY_AREF(flat, 2 * i + 1);
         csettings[n_total++] = (chc_query_setting){
-            .name = StringValueCStr(sname), .value = StringValueCStr(sval)
+            .name = RSTRING_PTR(sname), .value = RSTRING_PTR(sval)
         };
-        rb_ary_push(flat, sname);
-        rb_ary_push(flat, sval);
     }
 
     chc_query_opts qopts = { .settings = csettings, .n_settings = (size_t)n_total };
 
     chc_query_param *cparams = NULL;
-    long n_params = 0;
-    if (!NIL_P(params)) {
-        Check_Type(params, T_ARRAY);
-        n_params = RARRAY_LEN(params);
-        if (n_params > 0) {
-            cparams = ALLOCA_N(chc_query_param, n_params);
-            for (long i = 0; i < n_params; i++) {
-                VALUE pair = RARRAY_AREF(params, i);
-                VALUE pname = rb_ary_entry(pair, 0);
-                VALUE pval = rb_ary_entry(pair, 1);
-                cparams[i].name = StringValueCStr(pname);
-                cparams[i].value = StringValueCStr(pval);
-                rb_ary_push(flat, pname);
-                rb_ary_push(flat, pval);
-            }
-            qopts.params = cparams;
-            qopts.n_params = (size_t)n_params;
+    if (n_params > 0) {
+        cparams = ALLOCA_N(chc_query_param, n_params);
+        long base = 2 * n_settings;
+        for (long i = 0; i < n_params; i++) {
+            VALUE pname = RARRAY_AREF(flat, base + 2 * i);
+            VALUE pval = RARRAY_AREF(flat, base + 2 * i + 1);
+            cparams[i].name = RSTRING_PTR(pname);
+            cparams[i].value = RSTRING_PTR(pval);
         }
+        qopts.params = cparams;
+        qopts.n_params = (size_t)n_params;
     }
 
     chc_err err = {0};
@@ -752,7 +790,9 @@ native_client_recv_step(VALUE self)
             VALUE msg = rb_utf8_str_new(pkt.exception->display_text,
                                         (long)pkt.exception->display_text_len);
             clear_pending(nc);
-            nc->broken = 1;
+            /* A complete server exception terminates this query but leaves the
+             * native protocol synchronized and ready for the next query. */
+            nc->in_flight = 0;
             rb_exc_raise(rb_exc_new_str(eQueryError, msg));
         }
 
@@ -762,6 +802,13 @@ native_client_recv_step(VALUE self)
             if (pkt.progress.total_rows > nc->total_rows) nc->total_rows = pkt.progress.total_rows;
             nc->written_rows += pkt.progress.written_rows;
             nc->written_bytes += pkt.progress.written_bytes;
+            continue;
+        }
+
+        if (pkt.kind == CHC_PKT_PROFILE_INFO) {
+            nc->have_profile = 1;
+            nc->result_rows = pkt.profile.rows;
+            nc->result_bytes = pkt.profile.bytes;
             continue;
         }
 
@@ -807,7 +854,7 @@ native_client_recv_step(VALUE self)
                 for (size_t i = 0; i < n_cols; i++) {
                     cols[i] = decode_column(chc_block_column(b, i),
                                             chc_block_column_type(b, i),
-                                            (long)n_rows);
+                                            (long)n_rows, &nc->broken);
                     rb_ary_push(col_vals, cols[i]);
                 }
                 for (size_t r = 0; r < n_rows; r++) {
@@ -828,7 +875,10 @@ native_client_recv_step(VALUE self)
             nc->in_flight = 0;
             return sym_done;
         }
-        /* PONG / TOTALS / EXTREMES / LOG / PROFILE_* — skip */
+        /* PONG / TOTALS / EXTREMES / LOG / PROFILE_EVENTS — skip.
+         * Native-over-HTTP does not serialize totals or extremes into the
+         * response body either, so returning ordinary result rows keeps the
+         * two transports consistent. */
     }
 }
 
@@ -844,7 +894,9 @@ native_client_take_result(VALUE self)
     rb_hash_aset(summary, sym_written_rows, rb_obj_as_string(ULL2NUM(nc->written_rows)));
     rb_hash_aset(summary, sym_written_bytes, rb_obj_as_string(ULL2NUM(nc->written_bytes)));
     rb_hash_aset(summary, sym_total_rows_to_read, rb_obj_as_string(ULL2NUM(nc->total_rows)));
-    rb_hash_aset(summary, sym_result_rows, rb_obj_as_string(LONG2NUM(RARRAY_LEN(rows))));
+    uint64_t result_rows = nc->have_profile ? nc->result_rows : (uint64_t)RARRAY_LEN(rows);
+    rb_hash_aset(summary, sym_result_rows, rb_obj_as_string(ULL2NUM(result_rows)));
+    rb_hash_aset(summary, sym_result_bytes, rb_obj_as_string(ULL2NUM(nc->result_bytes)));
 
     VALUE result = rb_ary_new_from_args(4, rb_iv_get(self, "@columns"), rb_iv_get(self, "@types"),
                                         rows, summary);
@@ -881,6 +933,7 @@ Init_ch_connect_native(void)
     rb_require("date");
     rb_require("ipaddr");
     rb_require("bigdecimal");
+    rb_require("socket");
 
     VALUE mChConnect = rb_define_module("ChConnect");
     cNativeClient = rb_define_class_under(mChConnect, "NativeClient", rb_cObject);
@@ -900,12 +953,17 @@ Init_ch_connect_native(void)
     eUnsupportedTypeError = rb_path2class("ChConnect::UnsupportedTypeError");
     cIPAddr = rb_path2class("IPAddr");
     cDate = rb_path2class("Date");
+    VALUE cSocket = rb_path2class("Socket");
+    vAF_INET = rb_const_get(cSocket, rb_intern("AF_INET"));
+    vAF_INET6 = rb_const_get(cSocket, rb_intern("AF_INET6"));
 
     rb_gc_register_address(&eQueryError);
     rb_gc_register_address(&eConnectionError);
     rb_gc_register_address(&eUnsupportedTypeError);
     rb_gc_register_address(&cIPAddr);
     rb_gc_register_address(&cDate);
+    rb_gc_register_address(&vAF_INET);
+    rb_gc_register_address(&vAF_INET6);
 
     id_jd = rb_intern("jd");
     id_new = rb_intern("new");
@@ -919,6 +977,7 @@ Init_ch_connect_native(void)
     sym_written_bytes = ID2SYM(rb_intern("written_bytes"));
     sym_total_rows_to_read = ID2SYM(rb_intern("total_rows_to_read"));
     sym_result_rows = ID2SYM(rb_intern("result_rows"));
+    sym_result_bytes = ID2SYM(rb_intern("result_bytes"));
     sym_done = ID2SYM(rb_intern("done"));
     sym_want_read = ID2SYM(rb_intern("want_read"));
 

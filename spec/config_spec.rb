@@ -91,6 +91,53 @@ RSpec.describe ChConnect::Config do
       expect(config.port).to eq(8123)
       expect(config.database).to eq("")
     end
+
+    it "maps an HTTPS URL to native TLS settings when native transport is selected" do
+      config = described_class.new(transport: :native)
+      config.url = "https://user:pass@clickhouse.example.com:9440/analytics"
+
+      expect(config.transport).to eq(:native)
+      expect(config.tcp_port).to eq(9440)
+      expect(config.ssl).to be(true)
+      expect(config.host).to eq("clickhouse.example.com")
+      expect(config.database).to eq("analytics")
+    end
+
+    it "records native port and TLS settings before native transport is selected" do
+      config = described_class.new
+      config.url = "https://clickhouse.example.com:9440/analytics"
+      config.transport = :native
+
+      expect(config.tcp_port).to eq(9440)
+      expect(config.ssl).to be(true)
+    end
+
+    it "does not replace native defaults while an HTTP URL remains HTTP-only" do
+      config = described_class.new
+      config.url = "http://clickhouse.example.com:8123/analytics"
+
+      expect(config.transport).to eq(:http)
+      expect(config.tcp_port).to eq(9000)
+      expect(config.ssl).to be(false)
+    end
+
+    it "selects native transport for clickhouse URLs" do
+      config = described_class.new
+      config.url = "clickhouse://user:pass@clickhouse.example.com:9000/analytics"
+
+      expect(config.transport).to eq(:native)
+      expect(config.tcp_port).to eq(9000)
+      expect(config.ssl).to be(false)
+    end
+
+    it "uses the secure native default port for clickhouses URLs" do
+      config = described_class.new
+      config.url = "clickhouses://clickhouse.example.com/analytics"
+
+      expect(config.transport).to eq(:native)
+      expect(config.tcp_port).to eq(9440)
+      expect(config.ssl).to be(true)
+    end
   end
 
   describe "attribute accessors" do

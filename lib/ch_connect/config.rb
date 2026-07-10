@@ -55,7 +55,8 @@ module ChConnect
     # @return [Boolean] Use TLS for the :native transport (default: false)
     # @return [Boolean] Verify the server certificate when ssl is enabled (default: true)
     # @return [String, nil] Path to a CA certificate file for TLS verification (default: system CA store)
-    attr_accessor :transport, :tcp_port, :compression, :ssl, :ssl_verify, :ssl_ca, :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    attr_accessor :tcp_port, :compression, :ssl, :ssl_verify, :ssl_ca, :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    attr_reader :transport
 
     # Creates a new configuration instance.
     #
@@ -85,12 +86,43 @@ module ChConnect
     # @return [void]
     def url=(url)
       uri = URI(url)
-      @scheme = uri.scheme
+      native_scheme = %w[clickhouse clickhouses tcp tcps].include?(uri.scheme)
+      secure = %w[https clickhouses tcps].include?(uri.scheme)
+
+      # Remember the endpoint so transport can be assigned after url without
+      # changing the dormant native defaults of an HTTP-only configuration.
+      @url_tcp_port = uri.port || (secure ? 9440 : 9000) if native_scheme
+      @url_tcp_port = uri.port if %w[http https].include?(uri.scheme)
+      @url_ssl = secure if native_scheme || %w[http https].include?(uri.scheme)
+
+      if native_scheme
+        self.transport = :native
+        # Keep the HTTP fields coherent if the transport is changed later.
+        @scheme = secure ? "https" : "http"
+        @port = uri.port || (secure ? 8443 : 8123)
+      else
+        @scheme = uri.scheme
+        @port = uri.port
+        apply_url_to_native if @transport == :native
+      end
       @host = uri.host
-      @port = uri.port
       @database = uri.path.delete_prefix("/")
       @username = uri.user
       @password = uri.password
+    end
+
+    # Selects the transport. A previously assigned URL becomes the native
+    # endpoint at this point, making url/transport assignment order irrelevant.
+    def transport=(transport)
+      @transport = transport
+      apply_url_to_native if transport == :native
+    end
+
+    private
+
+    def apply_url_to_native
+      @tcp_port = @url_tcp_port if @url_tcp_port
+      @ssl = @url_ssl unless @url_ssl.nil?
     end
   end
 end

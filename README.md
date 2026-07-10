@@ -83,6 +83,18 @@ ChConnect.configure do |config|
 end
 ```
 
+Native URLs configure the TCP port and TLS mode as well as credentials and
+database. `clickhouse://`/`tcp://` are plaintext; `clickhouses://`/`tcps://`
+enable TLS and select native transport. HTTP(S) URLs also record their port and
+TLS mode for native use, regardless of whether `transport = :native` is set
+before or after the URL.
+
+```ruby
+ChConnect.configure do |config|
+  config.url = "clickhouses://user:pass@clickhouse.example.com:9440/mydb"
+end
+```
+
 ### Single Connection
 
 ```ruby
@@ -217,9 +229,10 @@ Details and caveats:
   stdlib and is always available.
 - Each `Connection` keeps a pool (`pool_size`) of TCP connections.
 - `read_timeout` bounds time-without-data, like the HTTP transport. `Ctrl-C`
-  and `Thread#kill` interrupt in-flight queries cleanly.
+  and `Thread#kill` interrupt in-flight queries cleanly; `write_timeout`
+  bounds native socket writes.
 - Not supported (yet): INSERT streaming optimizations, JRuby/TruffleRuby
-  (they fall back to `transport: :http`).
+  (`transport: :native` raises; use the default `transport: :http`).
 
 ## Configuration Options
 
@@ -239,7 +252,7 @@ Details and caveats:
 | `password` | `""` | Authentication password |
 | `connection_timeout` | `5` | Connection timeout in seconds |
 | `read_timeout` | `60` | Read timeout in seconds |
-| `write_timeout` | `60` | Write timeout in seconds (HTTP only) |
+| `write_timeout` | `60` | Write timeout in seconds |
 | `keep_alive_timeout` | `8` | Idle persistent connection timeout in seconds (HTTP only) |
 | `pool_size` | `100` | Connection pool size |
 | `pool_timeout` | `5` | Pool checkout timeout in seconds |

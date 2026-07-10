@@ -373,6 +373,26 @@ RSpec.describe ChConnect do
         expect(response.columns).to eq([:number])
         expect(response.types).to eq([:UInt64])
       end
+
+      it "returns ordinary rows consistently for WITH TOTALS" do
+        response = connection.query(<<~SQL)
+          SELECT number % 2 AS bucket, count() AS count
+          FROM numbers(4)
+          GROUP BY bucket WITH TOTALS
+          ORDER BY bucket
+        SQL
+
+        expect(response.rows).to eq([[0, 2], [1, 2]])
+      end
+
+      it "returns ordinary rows consistently when extremes are enabled" do
+        response = connection.query(
+          "SELECT number FROM numbers(3) ORDER BY number",
+          settings: {extremes: 1}
+        )
+
+        expect(response.rows).to eq([[0], [1], [2]])
+      end
     end
 
     describe "column metadata" do
@@ -396,6 +416,9 @@ RSpec.describe ChConnect do
         expect(response.summary).to be_a(Hash)
         expect(response.summary).to have_key(:read_rows)
         expect(response.summary).to have_key(:read_bytes)
+        expect(response.summary).to have_key(:result_rows)
+        expect(response.summary).to have_key(:result_bytes)
+        expect(response.summary).to have_key(:elapsed_ns)
         expect(response.summary.values_at(:read_rows, :read_bytes)).to all(be_a(String))
       end
     end
@@ -466,6 +489,15 @@ RSpec.describe ChConnect do
         )
 
         expect(response.rows).to eq([[7]])
+      end
+
+      it "passes nil as SQL NULL consistently" do
+        response = connection.query(
+          "SELECT {value:Nullable(String)} AS value",
+          params: {param_value: nil}
+        )
+
+        expect(response.rows).to eq([[nil]])
       end
     end
   end

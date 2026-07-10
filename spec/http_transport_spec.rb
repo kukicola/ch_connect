@@ -31,4 +31,11 @@ RSpec.describe ChConnect::HttpTransport do
       }.to raise_error(ChConnect::QueryError, /[Aa]uthentication|password/)
     end
   end
+
+  describe "parameter formatting" do
+    it "encodes nil as ClickHouse's HTTP NULL marker" do
+      expect(transport.send(:format_params, {param_value: nil, param_name: "alice"}))
+        .to eq({param_value: "\\N", param_name: "alice"})
+    end
+  end
 end
