@@ -11,9 +11,9 @@ RSpec.describe ChConnect::TcpTransport do
       transport: :native
     )
   end
-  let(:transport) { described_class.new(config) }
+  let(:transport) { @transport = described_class.new(config) }
 
-  after { transport.close }
+  after { @transport&.close }
 
   describe "#query" do
     it "returns a Response for valid query" do
@@ -92,7 +92,56 @@ RSpec.describe ChConnect::TcpTransport do
     end
   end
 
+  describe "summary" do
+    it "uses the same string value types as the HTTP transport" do
+      transport # load the native extension without opening a socket
+      client = ChConnect::NativeClient.new("default", "default", "", 0)
+      client.instance_variable_set(:@columns, [])
+      client.instance_variable_set(:@types, [])
+      client.instance_variable_set(:@rows, [])
+
+      summary = client.take_result.last
+
+      expect(summary.values).to all(be_a(String))
+    ensure
+      client&.close
+    end
+  end
+
   describe "timeouts" do
+    it "uses one connection timeout budget for the full native handshake" do
+      slot = described_class::Slot.allocate
+      client = double("NativeClient", handshake_step: nil, feed: nil)
+      config = double("Config", connection_timeout: 5.0)
+
+      slot.instance_variable_set(:@client, client)
+      slot.instance_variable_set(:@config, config)
+      allow(client).to receive(:handshake_step).and_return(:want_read, :want_read, :done)
+      allow(slot).to receive(:flush_output)
+      allow(slot).to receive(:monotonic_now).and_return(10.0, 11.0, 13.0)
+      expect(slot).to receive(:read_chunk).with(4.0).ordered.and_return("first")
+      expect(slot).to receive(:read_chunk).with(2.0).ordered.and_return("second")
+
+      slot.send(:handshake)
+
+      expect(client).to have_received(:feed).with("first")
+      expect(client).to have_received(:feed).with("second")
+    end
+
+    it "stops the native handshake once its connection timeout is exhausted" do
+      slot = described_class::Slot.allocate
+      client = double("NativeClient", handshake_step: :want_read)
+      config = double("Config", connection_timeout: 5.0)
+
+      slot.instance_variable_set(:@client, client)
+      slot.instance_variable_set(:@config, config)
+      allow(slot).to receive(:flush_output)
+      allow(slot).to receive(:monotonic_now).and_return(10.0, 15.0)
+
+      expect { slot.send(:handshake) }
+        .to raise_error(ChConnect::ConnectionError, "native handshake timeout")
+    end
+
     it "times out when the server accepts but never responds" do
       silent_server = TCPServer.new("127.0.0.1", 0)
       port = silent_server.addr[1]

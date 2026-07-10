@@ -130,13 +130,17 @@ module ChConnect
       end
 
       def handshake
+        deadline = monotonic_now + @config.connection_timeout
         loop do
           state = @client.handshake_step
           flush_output
           break if state == :done
 
           # the handshake is part of connecting: bound it by connection_timeout
-          @client.feed(read_chunk(@config.connection_timeout))
+          remaining = deadline - monotonic_now
+          raise ConnectionError, "native handshake timeout" if remaining <= 0
+
+          @client.feed(read_chunk(remaining))
         end
       end
 
@@ -149,10 +153,12 @@ module ChConnect
       # Reads into a reusable buffer: feed copies the bytes synchronously,
       # so the buffer never needs to survive past the next read.
       def read_chunk(timeout = @config.read_timeout)
+        deadline = monotonic_now + timeout if timeout
         loop do
           case (chunk = @socket.read_nonblock(READ_CHUNK, @read_buf, exception: false))
           when :wait_readable, :wait_writable
-            wait_or_fail(@socket, chunk, timeout, "read timeout")
+            remaining = deadline && (deadline - monotonic_now)
+            wait_or_fail(@socket, chunk, remaining, "read timeout")
           when nil
             raise ConnectionError, "connection closed by server"
           else

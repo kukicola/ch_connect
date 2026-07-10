@@ -74,11 +74,71 @@ raise_unsupported_type(const chc_type *t)
     rb_raise(eUnsupportedTypeError, "Unsupported column type: %.*s", (int)len, name);
 }
 
+/* Native-format fixed-width values are always little-endian. Decode them
+ * explicitly instead of relying on the host's byte order. */
+static inline uint16_t
+load_u16le(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline uint32_t
+load_u32le(const uint8_t *p)
+{
+    return (uint32_t)p[0]
+        | ((uint32_t)p[1] << 8)
+        | ((uint32_t)p[2] << 16)
+        | ((uint32_t)p[3] << 24);
+}
+
 static inline uint64_t
 load_u64le(const uint8_t *p)
 {
-    uint64_t v;
-    memcpy(&v, p, 8);
+    return (uint64_t)load_u32le(p) | ((uint64_t)load_u32le(p + 4) << 32);
+}
+
+static inline int16_t
+load_i16le(const uint8_t *p)
+{
+    uint16_t u = load_u16le(p);
+    int16_t v;
+    memcpy(&v, &u, sizeof v);
+    return v;
+}
+
+static inline int32_t
+load_i32le(const uint8_t *p)
+{
+    uint32_t u = load_u32le(p);
+    int32_t v;
+    memcpy(&v, &u, sizeof v);
+    return v;
+}
+
+static inline int64_t
+load_i64le(const uint8_t *p)
+{
+    uint64_t u = load_u64le(p);
+    int64_t v;
+    memcpy(&v, &u, sizeof v);
+    return v;
+}
+
+static inline float
+load_f32le(const uint8_t *p)
+{
+    uint32_t bits = load_u32le(p);
+    float v;
+    memcpy(&v, &bits, sizeof v);
+    return v;
+}
+
+static inline double
+load_f64le(const uint8_t *p)
+{
+    uint64_t bits = load_u64le(p);
+    double v;
+    memcpy(&v, &bits, sizeof v);
     return v;
 }
 
@@ -107,7 +167,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
     }
     case CHC_UINT16: {
         for (long i = 0; i < n_rows; i++) {
-            uint16_t v; memcpy(&v, data + i * 2, 2);
+            uint16_t v = load_u16le(data + i * 2);
             rb_ary_push(ary, INT2FIX(v));
         }
         break;
@@ -115,21 +175,21 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
     case CHC_INT16:
     case CHC_ENUM16: {
         for (long i = 0; i < n_rows; i++) {
-            int16_t v; memcpy(&v, data + i * 2, 2);
+            int16_t v = load_i16le(data + i * 2);
             rb_ary_push(ary, INT2FIX(v));
         }
         break;
     }
     case CHC_UINT32: {
         for (long i = 0; i < n_rows; i++) {
-            uint32_t v; memcpy(&v, data + i * 4, 4);
+            uint32_t v = load_u32le(data + i * 4);
             rb_ary_push(ary, UINT2NUM(v));
         }
         break;
     }
     case CHC_INT32: {
         for (long i = 0; i < n_rows; i++) {
-            int32_t v; memcpy(&v, data + i * 4, 4);
+            int32_t v = load_i32le(data + i * 4);
             rb_ary_push(ary, INT2NUM(v));
         }
         break;
@@ -141,7 +201,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
     case CHC_INT64:
     case CHC_INTERVAL: {
         for (long i = 0; i < n_rows; i++) {
-            int64_t v; memcpy(&v, data + i * 8, 8);
+            int64_t v = load_i64le(data + i * 8);
             rb_ary_push(ary, LL2NUM(v));
         }
         break;
@@ -151,8 +211,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
         size_t nbytes = (kind == CHC_UINT128) ? 16 : 32;
         for (long i = 0; i < n_rows; i++) {
             rb_ary_push(ary, rb_integer_unpack(data + i * nbytes, nbytes, 1, 0,
-                                               INTEGER_PACK_LSWORD_FIRST |
-                                               INTEGER_PACK_NATIVE_BYTE_ORDER));
+                                               INTEGER_PACK_LITTLE_ENDIAN));
         }
         break;
     }
@@ -161,22 +220,21 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
         size_t nbytes = (kind == CHC_INT128) ? 16 : 32;
         for (long i = 0; i < n_rows; i++) {
             rb_ary_push(ary, rb_integer_unpack(data + i * nbytes, nbytes, 1, 0,
-                                               INTEGER_PACK_LSWORD_FIRST |
-                                               INTEGER_PACK_NATIVE_BYTE_ORDER |
+                                               INTEGER_PACK_LITTLE_ENDIAN |
                                                INTEGER_PACK_2COMP));
         }
         break;
     }
     case CHC_FLOAT32: {
         for (long i = 0; i < n_rows; i++) {
-            float v; memcpy(&v, data + i * 4, 4);
+            float v = load_f32le(data + i * 4);
             rb_ary_push(ary, DBL2NUM((double)v));
         }
         break;
     }
     case CHC_FLOAT64: {
         for (long i = 0; i < n_rows; i++) {
-            double v; memcpy(&v, data + i * 8, 8);
+            double v = load_f64le(data + i * 8);
             rb_ary_push(ary, DBL2NUM(v));
         }
         break;
@@ -189,21 +247,21 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
     }
     case CHC_DATE: {
         for (long i = 0; i < n_rows; i++) {
-            uint16_t days; memcpy(&days, data + i * 2, 2);
+            uint16_t days = load_u16le(data + i * 2);
             rb_ary_push(ary, rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + (long)days)));
         }
         break;
     }
     case CHC_DATE32: {
         for (long i = 0; i < n_rows; i++) {
-            int32_t days; memcpy(&days, data + i * 4, 4);
+            int32_t days = load_i32le(data + i * 4);
             rb_ary_push(ary, rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + (long)days)));
         }
         break;
     }
     case CHC_DATETIME: {
         for (long i = 0; i < n_rows; i++) {
-            uint32_t ts; memcpy(&ts, data + i * 4, 4);
+            uint32_t ts = load_u32le(data + i * 4);
             struct timespec tsp = { .tv_sec = (time_t)ts, .tv_nsec = 0 };
             rb_ary_push(ary, rb_time_timespec_new(&tsp, INT_MAX - 1)); /* UTC */
         }
@@ -214,7 +272,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
         int64_t mult = 1;
         for (int s = 0; s < 9 - scale; s++) mult *= 10;
         for (long i = 0; i < n_rows; i++) {
-            int64_t ticks; memcpy(&ticks, data + i * 8, 8);
+            int64_t ticks = load_i64le(data + i * 8);
             __int128 tns = (__int128)ticks * mult;
             int64_t sec = (int64_t)(tns / 1000000000);
             int64_t nsec = (int64_t)(tns % 1000000000);
@@ -243,7 +301,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
     case CHC_IPV4: {
         char buf[16];
         for (long i = 0; i < n_rows; i++) {
-            uint32_t v; memcpy(&v, data + i * 4, 4);
+            uint32_t v = load_u32le(data + i * 4);
             snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
                      (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
             rb_ary_push(ary, rb_funcall(cIPAddr, id_new, 1, rb_utf8_str_new_cstr(buf)));
@@ -271,16 +329,15 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows)
         for (long i = 0; i < n_rows; i++) {
             VALUE unscaled;
             if (kind == CHC_DECIMAL32) {
-                int32_t v; memcpy(&v, data + i * 4, 4);
+                int32_t v = load_i32le(data + i * 4);
                 unscaled = INT2NUM(v);
             } else if (kind == CHC_DECIMAL64) {
-                int64_t v; memcpy(&v, data + i * 8, 8);
+                int64_t v = load_i64le(data + i * 8);
                 unscaled = LL2NUM(v);
             } else {
                 size_t nbytes = (kind == CHC_DECIMAL128) ? 16 : 32;
                 unscaled = rb_integer_unpack(data + i * nbytes, nbytes, 1, 0,
-                                             INTEGER_PACK_LSWORD_FIRST |
-                                             INTEGER_PACK_NATIVE_BYTE_ORDER |
+                                             INTEGER_PACK_LITTLE_ENDIAN |
                                              INTEGER_PACK_2COMP);
             }
             VALUE bd = rb_funcall(rb_mKernel, id_BigDecimal, 1, unscaled);
@@ -782,12 +839,12 @@ native_client_take_result(VALUE self)
 
     VALUE rows = rb_iv_get(self, "@rows");
     VALUE summary = rb_hash_new();
-    rb_hash_aset(summary, sym_read_rows, ULL2NUM(nc->read_rows));
-    rb_hash_aset(summary, sym_read_bytes, ULL2NUM(nc->read_bytes));
-    rb_hash_aset(summary, sym_written_rows, ULL2NUM(nc->written_rows));
-    rb_hash_aset(summary, sym_written_bytes, ULL2NUM(nc->written_bytes));
-    rb_hash_aset(summary, sym_total_rows_to_read, ULL2NUM(nc->total_rows));
-    rb_hash_aset(summary, sym_result_rows, LONG2NUM(RARRAY_LEN(rows)));
+    rb_hash_aset(summary, sym_read_rows, rb_obj_as_string(ULL2NUM(nc->read_rows)));
+    rb_hash_aset(summary, sym_read_bytes, rb_obj_as_string(ULL2NUM(nc->read_bytes)));
+    rb_hash_aset(summary, sym_written_rows, rb_obj_as_string(ULL2NUM(nc->written_rows)));
+    rb_hash_aset(summary, sym_written_bytes, rb_obj_as_string(ULL2NUM(nc->written_bytes)));
+    rb_hash_aset(summary, sym_total_rows_to_read, rb_obj_as_string(ULL2NUM(nc->total_rows)));
+    rb_hash_aset(summary, sym_result_rows, rb_obj_as_string(LONG2NUM(RARRAY_LEN(rows))));
 
     VALUE result = rb_ary_new_from_args(4, rb_iv_get(self, "@columns"), rb_iv_get(self, "@types"),
                                         rows, summary);

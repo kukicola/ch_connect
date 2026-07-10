@@ -19,6 +19,15 @@ RSpec.describe ChConnect do
     end
   end
 
+  describe ChConnect::Connection do
+    it "rejects unknown transports instead of falling back to HTTP" do
+      config = ChConnect::Config.new(transport: "native", ssl: true)
+
+      expect { described_class.new(config) }
+        .to raise_error(ChConnect::Error, /unknown transport: "native"/)
+    end
+  end
+
   describe "querying" do
     let(:connection) { ChConnect::Connection.new }
 
@@ -387,6 +396,7 @@ RSpec.describe ChConnect do
         expect(response.summary).to be_a(Hash)
         expect(response.summary).to have_key(:read_rows)
         expect(response.summary).to have_key(:read_bytes)
+        expect(response.summary.values_at(:read_rows, :read_bytes)).to all(be_a(String))
       end
     end
 
