@@ -1,24 +1,15 @@
 # frozen_string_literal: true
 
 RSpec.describe ChConnect::HttpTransport do
-  let(:config) { ChConnect.config }
+  let(:config) do
+    ChConnect::Config.new.tap do |http_config|
+      http_config.url = ENV.fetch("CLICKHOUSE_URL", "http://localhost:8123/default")
+    end
+  end
   let(:transport) { described_class.new(config) }
 
   describe "#query" do
-    it "returns a parsed Response for valid query" do
-      response = transport.query("SELECT 1 AS one")
-
-      expect(response).to be_a(ChConnect::Response)
-      expect(response.columns).to eq([:one])
-      expect(response.rows).to eq([[1]])
-      expect(response.summary).to be_a(Hash)
-    end
-
-    it "raises QueryError for invalid query" do
-      expect {
-        transport.query("INVALID SQL SYNTAX")
-      }.to raise_error(ChConnect::QueryError, /Syntax error/)
-    end
+    it_behaves_like "a ClickHouse transport"
 
     it "raises QueryError for auth failures (no summary header in response)" do
       bad_config = ChConnect::Config.new(

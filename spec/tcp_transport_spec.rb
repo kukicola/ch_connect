@@ -4,7 +4,7 @@ RSpec.describe ChConnect::TcpTransport do
   let(:config) do
     ChConnect::Config.new(
       host: ChConnect.config.host,
-      tcp_port: ChConnect.config.tcp_port,
+      port: ENV.fetch("CLICKHOUSE_TCP_PORT", 9000).to_i,
       database: ChConnect.config.database,
       username: ChConnect.config.username,
       password: ChConnect.config.password,
@@ -16,21 +16,7 @@ RSpec.describe ChConnect::TcpTransport do
   after { @transport&.close }
 
   describe "#query" do
-    it "returns a Response for valid query" do
-      response = transport.query("SELECT 1 AS one")
-
-      expect(response).to be_a(ChConnect::Response)
-      expect(response.columns).to eq([:one])
-      expect(response.rows).to eq([[1]])
-      expect(response.summary).to be_a(Hash)
-      expect(response.summary).to include(:result_rows, :result_bytes, :elapsed_ns)
-    end
-
-    it "raises QueryError for invalid query" do
-      expect {
-        transport.query("INVALID SQL SYNTAX")
-      }.to raise_error(ChConnect::QueryError, /Syntax error/)
-    end
+    it_behaves_like "a ClickHouse transport"
 
     it "recovers the pooled connection after a server error" do
       transport # load the extension before installing the constructor spy
@@ -87,12 +73,7 @@ RSpec.describe ChConnect::TcpTransport do
     let(:typed_query) { "SELECT number, toString(number) AS s, toDate('2024-01-01') + number AS d, [number, number + 1] AS a FROM system.numbers LIMIT 1000" }
 
     def rows_with(compression)
-      alt_config = ChConnect::Config.new(
-        host: config.host, tcp_port: config.tcp_port,
-        username: config.username, password: config.password,
-        transport: :native, compression: compression
-      )
-      alt = described_class.new(alt_config)
+      alt = described_class.new(config.dup.tap { |c| c.compression = compression })
       alt.query(typed_query).rows
     ensure
       alt&.close
@@ -209,7 +190,7 @@ RSpec.describe ChConnect::TcpTransport do
       accepter = Thread.new { silent_server.accept }
 
       silent_config = ChConnect::Config.new(
-        host: "127.0.0.1", tcp_port: port, transport: :native,
+        host: "127.0.0.1", port: port, transport: :native,
         connection_timeout: 0.5, max_retries: 0
       )
       silent_transport = described_class.new(silent_config)
@@ -226,7 +207,7 @@ RSpec.describe ChConnect::TcpTransport do
 
     it "times out connecting to an unroutable address" do
       dead_config = ChConnect::Config.new(
-        host: "10.255.255.1", tcp_port: 9000, transport: :native,
+        host: "10.255.255.1", port: 9000, transport: :native,
         connection_timeout: 0.5, max_retries: 0
       )
       dead_transport = described_class.new(dead_config)
@@ -240,13 +221,7 @@ RSpec.describe ChConnect::TcpTransport do
   end
 
   describe "retries" do
-    let(:retry_config) do
-      ChConnect::Config.new(
-        host: config.host, tcp_port: config.tcp_port,
-        username: config.username, password: config.password,
-        transport: :native, max_retries: 3
-      )
-    end
+    let(:retry_config) { config.dup.tap { |c| c.max_retries = 3 } }
 
     before do
       # ensure the extension (and thus the NativeClient constant) is loaded
@@ -319,7 +294,7 @@ RSpec.describe ChConnect::TcpTransport do
   describe "TLS", if: ENV["CH_TLS_PORT"] do
     it "queries over TLS with CA verification" do
       tls_config = ChConnect::Config.new(
-        host: config.host, tcp_port: Integer(ENV["CH_TLS_PORT"]),
+        host: config.host, port: Integer(ENV["CH_TLS_PORT"]),
         username: config.username, password: config.password,
         transport: :native, ssl: true, ssl_verify: true, ssl_ca: ENV.fetch("CH_TLS_CA")
       )
@@ -332,7 +307,7 @@ RSpec.describe ChConnect::TcpTransport do
 
     it "rejects an unverifiable certificate against the system store" do
       tls_config = ChConnect::Config.new(
-        host: config.host, tcp_port: Integer(ENV["CH_TLS_PORT"]),
+        host: config.host, port: Integer(ENV["CH_TLS_PORT"]),
         username: config.username, password: config.password,
         transport: :native, ssl: true, ssl_verify: true, max_retries: 0
       )
@@ -347,8 +322,8 @@ RSpec.describe ChConnect::TcpTransport do
 
   describe "URL-based configuration" do
     it "handles a URL without credentials" do
-      url_config = ChConnect::Config.new(transport: :native, tcp_port: config.tcp_port)
-      url_config.url = "clickhouse://#{config.host}:#{config.tcp_port}/default"
+      url_config = ChConnect::Config.new
+      url_config.url = "clickhouse://#{config.host}:#{config.port}/default"
       url_transport = described_class.new(url_config)
 
       # must not crash on nil credentials; auth outcome depends on the server

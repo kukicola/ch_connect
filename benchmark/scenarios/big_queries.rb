@@ -12,13 +12,7 @@ puts "Testing large result set parsing (100K rows, various types)"
 puts
 
 config = BenchmarkHelper::CONFIG
-adapters = {
-  ch_connect: Adapters::ChConnectAdapter.new(config),
-  ch_connect_tcp: Adapters::ChConnectTcpAdapter.new(config),
-  click_house: Adapters::ClickHouseAdapter.new(config),
-  clickhouse: Adapters::ClickhouseAdapter.new(config),
-  gitlab: Adapters::GitlabAdapter.new(config)
-}
+adapters = Adapters.build_all(config)
 
 BenchmarkHelper.verify_results(adapters, BIG_QUERY)
 

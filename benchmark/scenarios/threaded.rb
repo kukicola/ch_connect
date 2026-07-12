@@ -48,13 +48,7 @@ puts "SCENARIO 3: Threaded throughput (4 col x 10K rows, #{DURATION}s per point)
 puts "=" * 76
 
 config = BenchmarkHelper::CONFIG
-adapters = {
-  ch_connect: Adapters::ChConnectAdapter.new(config),
-  ch_connect_tcp: Adapters::ChConnectTcpAdapter.new(config),
-  click_house: Adapters::ClickHouseAdapter.new(config),
-  clickhouse: Adapters::ClickhouseAdapter.new(config),
-  gitlab: Adapters::GitlabAdapter.new(config)
-}
+adapters = Adapters.build_all(config)
 
 # warmup / sanity
 adapters.each_value { |a| a.execute(THREADED_QUERY) }

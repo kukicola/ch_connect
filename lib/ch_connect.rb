@@ -24,7 +24,7 @@ require_relative "ch_connect/native_format_parser"
 # @example Native TCP transport
 #   ChConnect.configure do |config|
 #     config.transport = :native
-#     config.tcp_port = 9000
+#     config.port = 9000
 #   end
 module ChConnect
   # Base error class for all ChConnect errors

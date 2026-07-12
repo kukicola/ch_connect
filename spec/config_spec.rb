@@ -92,33 +92,28 @@ RSpec.describe ChConnect::Config do
       expect(config.database).to eq("")
     end
 
-    it "maps an HTTPS URL to native TLS settings when native transport is selected" do
-      config = described_class.new(transport: :native)
+    it "derives the transport default port for portless URLs" do
+      config = described_class.new
+      config.url = "http://clickhouse.example.com/analytics"
+
+      expect(config.port).to eq(8123)
+    end
+
+    it "makes HTTP URL schemes authoritative" do
+      config = described_class.new(transport: :native, ssl: true)
       config.url = "https://user:pass@clickhouse.example.com:9440/analytics"
 
-      expect(config.transport).to eq(:native)
-      expect(config.tcp_port).to eq(9440)
-      expect(config.ssl).to be(true)
+      expect(config.transport).to eq(:http)
+      expect(config.port).to eq(9440)
+      expect(config.ssl).to be(false)
       expect(config.host).to eq("clickhouse.example.com")
       expect(config.database).to eq("analytics")
     end
 
-    it "records native port and TLS settings before native transport is selected" do
-      config = described_class.new
-      config.url = "https://clickhouse.example.com:9440/analytics"
-      config.transport = :native
-
-      expect(config.tcp_port).to eq(9440)
-      expect(config.ssl).to be(true)
-    end
-
-    it "does not replace native defaults while an HTTP URL remains HTTP-only" do
-      config = described_class.new
-      config.url = "http://clickhouse.example.com:8123/analytics"
-
-      expect(config.transport).to eq(:http)
-      expect(config.tcp_port).to eq(9000)
-      expect(config.ssl).to be(false)
+    it "derives defaults from manually selected transport and TLS mode" do
+      expect(described_class.new(transport: :native).port).to eq(9000)
+      expect(described_class.new(transport: :native, ssl: true).port).to eq(9440)
+      expect(described_class.new(scheme: "https").port).to eq(8443)
     end
 
     it "selects native transport for clickhouse URLs" do
@@ -126,7 +121,7 @@ RSpec.describe ChConnect::Config do
       config.url = "clickhouse://user:pass@clickhouse.example.com:9000/analytics"
 
       expect(config.transport).to eq(:native)
-      expect(config.tcp_port).to eq(9000)
+      expect(config.port).to eq(9000)
       expect(config.ssl).to be(false)
     end
 
@@ -135,8 +130,13 @@ RSpec.describe ChConnect::Config do
       config.url = "clickhouses://clickhouse.example.com/analytics"
 
       expect(config.transport).to eq(:native)
-      expect(config.tcp_port).to eq(9440)
+      expect(config.port).to eq(9440)
       expect(config.ssl).to be(true)
+    end
+
+    it "rejects unsupported URL schemes" do
+      expect { described_class.new.url = "ftp://clickhouse.example.com/data" }
+        .to raise_error(ArgumentError, /unsupported ClickHouse URL scheme/)
     end
   end
 

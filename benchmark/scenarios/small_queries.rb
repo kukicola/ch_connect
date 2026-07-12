@@ -13,13 +13,7 @@ puts "SQL: #{SMALL_QUERY}"
 puts
 
 config = BenchmarkHelper::CONFIG
-adapters = {
-  ch_connect: Adapters::ChConnectAdapter.new(config),
-  ch_connect_tcp: Adapters::ChConnectTcpAdapter.new(config),
-  click_house: Adapters::ClickHouseAdapter.new(config),
-  clickhouse: Adapters::ClickhouseAdapter.new(config),
-  gitlab: Adapters::GitlabAdapter.new(config)
-}
+adapters = Adapters.build_all(config)
 
 BenchmarkHelper.verify_results(adapters, SMALL_QUERY)
 

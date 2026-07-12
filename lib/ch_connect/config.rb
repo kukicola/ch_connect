@@ -6,18 +6,26 @@ module ChConnect
   # Configuration for ClickHouse connection.
   #
   # @example
-  #   config = ChConnect::Config.new(host: "db.example.com", port: 9000)
+  #   config = ChConnect::Config.new(host: "db.example.com", port: 8123)
   #
   # @example Using URL
   #   config = ChConnect::Config.new
   #   config.url = "http://user:pass@localhost:8123/mydb"
   class Config
+    URL_SCHEMES = {
+      "http" => [:http, false, "http"],
+      "https" => [:http, false, "https"],
+      "clickhouse" => [:native, false, "http"],
+      "tcp" => [:native, false, "http"],
+      "clickhouses" => [:native, true, "https"],
+      "tcps" => [:native, true, "https"]
+    }.transform_values(&:freeze).freeze
+
     DEFAULTS = {
       transport: :http,
       scheme: "http",
       host: "localhost",
-      port: 8123,
-      tcp_port: 9000,
+      port: nil,
       compression: :lz4,
       ssl: false,
       ssl_verify: true,
@@ -50,20 +58,20 @@ module ChConnect
     # @return [Integer] Max retry attempts on connection errors
     # @return [#instrument] Instrumenter for query instrumentation
     # @return [Symbol] Transport to use: :http (default) or :native (TCP protocol, requires compiled extension)
-    # @return [Integer] Native TCP protocol port (used when transport is :native)
+    # @return [Integer] Active HTTP or native protocol port
     # @return [Symbol, nil] Block compression for :native transport: :lz4 (default), :zstd or nil
     # @return [Boolean] Use TLS for the :native transport (default: false)
     # @return [Boolean] Verify the server certificate when ssl is enabled (default: true)
     # @return [String, nil] Path to a CA certificate file for TLS verification (default: system CA store)
-    attr_accessor :tcp_port, :compression, :ssl, :ssl_verify, :ssl_ca, :scheme, :host, :port, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
-    attr_reader :transport
+    attr_accessor :transport, :compression, :ssl, :ssl_verify, :ssl_ca, :scheme, :host, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    attr_writer :port
 
     # Creates a new configuration instance.
     #
     # @param params [Hash] configuration options
     # @option params [String] :scheme URL scheme (default: "http")
     # @option params [String] :host server hostname (default: "localhost")
-    # @option params [Integer] :port server port (default: 8123)
+    # @option params [Integer, nil] :port active endpoint port (default depends on transport/TLS)
     # @option params [String] :database database name (default: "default")
     # @option params [String] :username authentication username (default: "")
     # @option params [String] :password authentication password (default: "")
@@ -80,49 +88,40 @@ module ChConnect
       end
     end
 
+    # Returns the explicitly configured port or the default for the active
+    # transport and TLS mode.
+    def port
+      @port || default_port
+    end
+
     # Sets configuration from a URL string.
     #
     # @param url [String] ClickHouse connection URL
     # @return [void]
     def url=(url)
       uri = URI(url)
-      native_scheme = %w[clickhouse clickhouses tcp tcps].include?(uri.scheme)
-      secure = %w[https clickhouses tcps].include?(uri.scheme)
-
-      # Remember the endpoint so transport can be assigned after url without
-      # changing the dormant native defaults of an HTTP-only configuration.
-      @url_tcp_port = uri.port || (secure ? 9440 : 9000) if native_scheme
-      @url_tcp_port = uri.port if %w[http https].include?(uri.scheme)
-      @url_ssl = secure if native_scheme || %w[http https].include?(uri.scheme)
-
-      if native_scheme
-        self.transport = :native
-        # Keep the HTTP fields coherent if the transport is changed later.
-        @scheme = secure ? "https" : "http"
-        @port = uri.port || (secure ? 8443 : 8123)
-      else
-        @scheme = uri.scheme
-        @port = uri.port
-        apply_url_to_native if @transport == :native
+      transport, ssl, scheme = URL_SCHEMES.fetch(uri.scheme) do
+        raise ArgumentError, "unsupported ClickHouse URL scheme: #{uri.scheme.inspect}"
       end
+
+      @transport = transport
+      @ssl = ssl
+      @scheme = scheme
+      # URI#port substitutes 80/443 for portless http(s) URLs; only a port
+      # written in the URL should override the transport-derived default.
+      @port = URI.split(url)[3]&.to_i
       @host = uri.host
       @database = uri.path.delete_prefix("/")
       @username = uri.user
       @password = uri.password
     end
 
-    # Selects the transport. A previously assigned URL becomes the native
-    # endpoint at this point, making url/transport assignment order irrelevant.
-    def transport=(transport)
-      @transport = transport
-      apply_url_to_native if transport == :native
-    end
-
     private
 
-    def apply_url_to_native
-      @tcp_port = @url_tcp_port if @url_tcp_port
-      @ssl = @url_ssl unless @url_ssl.nil?
+    def default_port
+      return ssl ? 9440 : 9000 if transport == :native
+
+      (scheme == "https") ? 8443 : 8123
     end
   end
 end

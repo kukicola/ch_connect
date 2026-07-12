@@ -9,42 +9,27 @@ require "net/http"
 require "uri"
 
 module Adapters
-  # Adapter for ch_connect - Native format, HTTPX
+  # Adapter for ch_connect over HTTPX or native TCP.
   class ChConnectAdapter
-    attr_reader :connection
+    attr_reader :connection, :name
 
-    def initialize(config = {})
+    def initialize(config = {}, transport: :http)
+      @name = (transport == :native) ? :ch_connect_tcp : :ch_connect
+      port = if transport == :native
+        config[:native_port] || 9000
+      else
+        config[:port] || 8123
+      end
       ch_config = ChConnect::Config.new(
         host: config[:host] || "localhost",
-        port: config[:port] || 8123,
+        port: port,
+        transport: transport,
         username: config[:username] || "default",
         password: config[:password] || "default"
       )
       @connection = ChConnect::Connection.new(ch_config)
     end
 
-    def name = :ch_connect
-    def execute(sql) = @connection.query(sql)
-    def result_to_array(result) = result.to_a
-    def result_row_count(result) = result.rows.size
-  end
-
-  # Adapter for ch_connect native TCP transport - Native format, C parser
-  class ChConnectTcpAdapter
-    attr_reader :connection
-
-    def initialize(config = {})
-      ch_config = ChConnect::Config.new(
-        host: config[:host] || "localhost",
-        tcp_port: config[:tcp_port] || 9000,
-        transport: :native,
-        username: config[:username] || "default",
-        password: config[:password] || "default"
-      )
-      @connection = ChConnect::Connection.new(ch_config)
-    end
-
-    def name = :ch_connect_tcp
     def execute(sql) = @connection.query(sql)
     def result_to_array(result) = result.to_a
     def result_row_count(result) = result.rows.size
@@ -127,5 +112,15 @@ module Adapters
     def execute(sql) = ClickHouse::Client.select(sql, :main, @config)
     def result_to_array(result) = result
     def result_row_count(result) = result.size
+  end
+
+  def self.build_all(config)
+    {
+      ch_connect: ChConnectAdapter.new(config),
+      ch_connect_tcp: ChConnectAdapter.new(config, transport: :native),
+      click_house: ClickHouseAdapter.new(config),
+      clickhouse: ClickhouseAdapter.new(config),
+      gitlab: GitlabAdapter.new(config)
+    }
   end
 end

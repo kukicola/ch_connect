@@ -83,11 +83,9 @@ ChConnect.configure do |config|
 end
 ```
 
-Native URLs configure the TCP port and TLS mode as well as credentials and
-database. `clickhouse://`/`tcp://` are plaintext; `clickhouses://`/`tcps://`
-enable TLS and select native transport. HTTP(S) URLs also record their port and
-TLS mode for native use, regardless of whether `transport = :native` is set
-before or after the URL.
+URL schemes select the transport, port and TLS mode as well as credentials and
+database. `http://`/`https://` select HTTP, `clickhouse://`/`tcp://` select
+plaintext native TCP, and `clickhouses://`/`tcps://` select native TCP with TLS.
 
 ```ruby
 ChConnect.configure do |config|
@@ -108,7 +106,7 @@ end
 
 ### Thread-Safe Usage
 
-Connections use httpx's built-in connection pooling, making them safe for concurrent use:
+Both transports pool connections, making a `Connection` safe for concurrent use:
 
 ```ruby
 conn = ChConnect::Connection.new
@@ -209,7 +207,7 @@ multi-threaded throughput:
 ```ruby
 ChConnect.configure do |config|
   config.transport = :native
-  config.tcp_port = 9000        # native protocol port (9440 for TLS)
+  config.port = 9000            # native protocol port (9440 for TLS)
   config.compression = :lz4     # :lz4 (default), :zstd or nil
   # TLS:
   # config.ssl = true
@@ -241,8 +239,7 @@ Details and caveats:
 | `transport` | `:http` | `:http` or `:native` (TCP protocol via C extension) |
 | `scheme` | `"http"` | URL scheme (http/https) |
 | `host` | `"localhost"` | ClickHouse server host |
-| `port` | `8123` | ClickHouse HTTP port |
-| `tcp_port` | `9000` | ClickHouse native protocol port (`:native` transport) |
+| `port` | `8123` / `9000` | Active HTTP/native protocol port (TLS defaults: 8443/9440) |
 | `compression` | `:lz4` | Block compression for `:native`: `:lz4`, `:zstd` or `nil` |
 | `ssl` | `false` | Use TLS for the `:native` transport |
 | `ssl_verify` | `true` | Verify server certificate when `ssl` is enabled |

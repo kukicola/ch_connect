@@ -29,14 +29,6 @@ module BenchmarkHelper
     LIMIT 100000
   SQL
 
-  # Builds a ChConnect connection from the shared CONFIG.
-  # Requires "ch_connect" to be loaded by the caller.
-  def self.ch_connect_connection(transport: :http, **overrides)
-    params = CONFIG.merge(overrides)
-    params[:transport] = :native if transport == :native
-    ChConnect::Connection.new(ChConnect::Config.new(params))
-  end
-
   # Run benchmark-ips comparison
   def self.run_ips(title, adapters:, warmup: 2, time: 5)
     puts "\n" + "=" * 60

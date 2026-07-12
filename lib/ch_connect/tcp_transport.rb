@@ -90,7 +90,7 @@ module ChConnect
       end
 
       def connect_socket
-        socket = Socket.tcp(@config.host, @config.tcp_port, connect_timeout: @config.connection_timeout)
+        socket = Socket.tcp(@config.host, @config.port, connect_timeout: @config.connection_timeout)
         wrapped = nil
         begin
           socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
@@ -192,8 +192,7 @@ module ChConnect
       def wait_or_fail(io, readiness, timeout, message)
         raise ConnectionError, message if timeout && timeout <= 0
 
-        plain = io.respond_to?(:to_io) ? io.to_io : io
-        raise ConnectionError, message unless plain.public_send(readiness, timeout)
+        raise ConnectionError, message unless io.to_io.public_send(readiness, timeout)
       end
 
       def monotonic_now
