@@ -13,12 +13,7 @@ require "ch_connect"
 Dir[File.join(__dir__, "support", "*.rb")].sort.each { |f| require f }
 
 ChConnect.configure do |config|
-  config.url = ENV.fetch("CLICKHOUSE_URL", "http://localhost:8123/default")
-
-  if ENV["CH_TRANSPORT"] == "native"
-    config.transport = :native
-    config.port = Integer(ENV.fetch("CLICKHOUSE_TCP_PORT", "9000"))
-  end
+  config.url = ENV.fetch("CLICKHOUSE_URL", "clickhouse://localhost:9000/default")
 end
 
 RSpec.configure do |config|

@@ -22,7 +22,6 @@ jobs:
       clickhouse:
         image: clickhouse/clickhouse-server:latest
         ports:
-          - 8123:8123
           - 9000:9000
         options: >-
           --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
@@ -51,19 +50,13 @@ jobs:
           make
           cp "ch_connect_native.$(ruby -rrbconfig -e 'print RbConfig::CONFIG["DLEXT"]')" ../../lib/ch_connect/
 
-      - name: Run tests (HTTP transport)
-        run: bundle exec rspec
-        env:
-          CLICKHOUSE_URL: http://default:password@localhost:8123/default
-
       - name: Start TLS-enabled ClickHouse
         run: spec/support/start_tls_clickhouse.sh "$RUNNER_TEMP/ch-tls" password
 
-      - name: Run tests (native TCP transport)
+      - name: Run tests
         run: bundle exec rspec
         env:
-          CLICKHOUSE_URL: http://default:password@localhost:8123/default
-          CH_TRANSPORT: native
+          CLICKHOUSE_URL: clickhouse://default:password@localhost:9000/default
           CH_TLS_PORT: "9440"
           CH_TLS_CA: ${{ runner.temp }}/ch-tls/server.crt
 

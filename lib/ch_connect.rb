@@ -3,29 +3,20 @@
 require_relative "ch_connect/version"
 require_relative "ch_connect/null_instrumenter"
 require_relative "ch_connect/config"
-require_relative "ch_connect/http_transport"
 require_relative "ch_connect/tcp_transport"
 require_relative "ch_connect/connection"
 require_relative "ch_connect/response"
-require_relative "ch_connect/body_reader"
-require_relative "ch_connect/native_format_parser"
 
 # Ruby client for ClickHouse database with Native format support.
 #
 # @example Basic usage
 #   ChConnect.configure do |config|
 #     config.host = "localhost"
-#     config.port = 8123
+#     config.port = 9000
 #   end
 #
 #   conn = ChConnect::Connection.new
 #   response = conn.query("SELECT 1")
-#
-# @example Native TCP transport
-#   ChConnect.configure do |config|
-#     config.transport = :native
-#     config.port = 9000
-#   end
 module ChConnect
   # Base error class for all ChConnect errors
   class Error < StandardError; end

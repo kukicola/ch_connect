@@ -15,14 +15,7 @@ module ChConnect
     # @param config [Config] configuration instance (defaults to global config)
     def initialize(config = ChConnect.config)
       @config = config
-      @transport = case config.transport
-      when :http
-        HttpTransport.new(config)
-      when :native
-        TcpTransport.new(config)
-      else
-        raise Error, "unknown transport: #{config.transport.inspect} (use :http or :native)"
-      end
+      @transport = TcpTransport.new(config)
     end
 
     # Executes a SQL query and returns the response.

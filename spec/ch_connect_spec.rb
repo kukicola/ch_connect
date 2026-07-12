@@ -19,15 +19,6 @@ RSpec.describe ChConnect do
     end
   end
 
-  describe ChConnect::Connection do
-    it "rejects unknown transports instead of falling back to HTTP" do
-      config = ChConnect::Config.new(transport: "native", ssl: true)
-
-      expect { described_class.new(config) }
-        .to raise_error(ChConnect::Error, /unknown transport: "native"/)
-    end
-  end
-
   describe "querying" do
     let(:connection) { ChConnect::Connection.new }
 
@@ -410,7 +401,7 @@ RSpec.describe ChConnect do
     end
 
     describe "summary" do
-      it "returns X-ClickHouse-Summary header" do
+      it "returns query metrics" do
         response = connection.query("SELECT 1")
 
         expect(response.summary).to be_a(Hash)
@@ -491,7 +482,7 @@ RSpec.describe ChConnect do
         expect(response.rows).to eq([[7]])
       end
 
-      it "passes nil as SQL NULL consistently" do
+      it "passes nil as SQL NULL" do
         response = connection.query(
           "SELECT {value:Nullable(String)} AS value",
           params: {param_value: nil}

@@ -1,13 +1,6 @@
 # frozen_string_literal: true
 
-# The native extension is MRI-only. On other engines (JRuby, TruffleRuby)
-# write a no-op Makefile so the gem still installs; transport :http works
-# everywhere and transport :native raises a descriptive error at runtime.
-unless RUBY_ENGINE == "ruby"
-  File.write("Makefile", "all:\ninstall:\nclean:\n")
-  puts "ch_connect_native is MRI-only; skipping build (transport :native will be unavailable)"
-  exit 0
-end
+abort "ch_connect requires MRI Ruby" unless RUBY_ENGINE == "ruby"
 
 require "mkmf"
 

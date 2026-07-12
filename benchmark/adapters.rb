@@ -9,21 +9,14 @@ require "net/http"
 require "uri"
 
 module Adapters
-  # Adapter for ch_connect over HTTPX or native TCP.
+  # Adapter for ch_connect's native TCP protocol.
   class ChConnectAdapter
     attr_reader :connection, :name
 
-    def initialize(config = {}, transport: :http)
-      @name = (transport == :native) ? :ch_connect_tcp : :ch_connect
-      port = if transport == :native
-        config[:native_port] || 9000
-      else
-        config[:port] || 8123
-      end
+    def initialize(config = {})
+      @name = :ch_connect
       ch_config = ChConnect::Config.new(
         host: config[:host] || "localhost",
-        port: port,
-        transport: transport,
         username: config[:username] || "default",
         password: config[:password] || "default"
       )
@@ -117,7 +110,6 @@ module Adapters
   def self.build_all(config)
     {
       ch_connect: ChConnectAdapter.new(config),
-      ch_connect_tcp: ChConnectAdapter.new(config, transport: :native),
       click_house: ClickHouseAdapter.new(config),
       clickhouse: ClickhouseAdapter.new(config),
       gitlab: GitlabAdapter.new(config)

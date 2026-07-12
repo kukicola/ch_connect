@@ -19,6 +19,13 @@ module ChConnect
     COMPRESSION_CODES = {nil => 0, :lz4 => 1, :zstd => 2}.freeze
 
     READ_CHUNK = 64 * 1024
+    WRITE_CHUNK = 64 * 1024
+    PARAM_ESCAPES = {
+      "\0" => "\\0", "\a" => "\\a", "\b" => "\\b", "\e" => "\\e",
+      "\f" => "\\f", "\n" => "\\n", "\r" => "\\r", "\t" => "\\t",
+      "\v" => "\\v", "'" => "\\'", "\\" => "\\\\"
+    }.freeze
+    PARAM_ESCAPE_PATTERN = /[\0\a\b\e\f\n\r\t\v'\\]/
 
     # A pooled slot owning one socket + protocol state machine pair.
     # Connects lazily and replaces the connection when it is broken or was
@@ -31,13 +38,13 @@ module ChConnect
         @compression_code = compression_code
         @socket = nil
         @client = nil
+        @pid = Process.pid
         @read_buf = String.new(capacity: READ_CHUNK)
       end
 
       def query(sql, params, settings)
         ensure_connected
 
-        started_at = monotonic_now
         @client.send_query(sql, params, settings)
         flush_output
         loop do
@@ -46,21 +53,12 @@ module ChConnect
           when :want_read then @client.feed(read_chunk)
           end
         end
-        result = @client.take_result
-        result.last[:elapsed_ns] = ((monotonic_now - started_at) * 1_000_000_000).to_i.to_s
-        result
+        @client.take_result
       rescue IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
-        discard
         raise ConnectionError, "#{e.class}: #{e.message}"
-      rescue ConnectionError
-        discard
-        raise
       ensure
         # a non-local exit (Thread#kill, Interrupt, Timeout) skips the rescues
-        # above but leaves the client mid-stream; close immediately instead of
-        # waiting for this slot's next checkout. The rescue discards above are
-        # belt-and-suspenders over this — after them @client is nil and this
-        # check is a no-op.
+        # above but leaves the client mid-stream; close immediately.
         discard if @client&.broken?
       end
 
@@ -71,6 +69,10 @@ module ChConnect
       private
 
       def ensure_connected
+        if @pid != Process.pid
+          discard
+          @pid = Process.pid
+        end
         discard if @client&.broken? || @socket&.closed?
         return if @client
 
@@ -150,22 +152,27 @@ module ChConnect
       def flush_output
         deadline = monotonic_now + @config.write_timeout if @config.write_timeout
         while (out = @client.take_output)
-          offset = 0
-          while offset < out.bytesize
-            if deadline && deadline - monotonic_now <= 0
-              raise ConnectionError, "write timeout"
-            end
+          out_offset = 0
+          while out_offset < out.bytesize
+            chunk = out.byteslice(out_offset, [WRITE_CHUNK, out.bytesize - out_offset].min)
+            chunk_offset = 0
+            while chunk_offset < chunk.bytesize
+              if deadline && deadline - monotonic_now <= 0
+                raise ConnectionError, "write timeout"
+              end
 
-            chunk = (offset == 0) ? out : out.byteslice(offset, out.bytesize - offset)
-            case (written = @socket.write_nonblock(chunk, exception: false))
-            when :wait_readable, :wait_writable
-              remaining = deadline && (deadline - monotonic_now)
-              wait_or_fail(@socket, written, remaining, "write timeout")
-            else
-              raise ConnectionError, "connection closed while writing" if written == 0
+              pending = (chunk_offset == 0) ? chunk : chunk.byteslice(chunk_offset, chunk.bytesize - chunk_offset)
+              case (written = @socket.write_nonblock(pending, exception: false))
+              when :wait_readable, :wait_writable
+                remaining = deadline && (deadline - monotonic_now)
+                wait_or_fail(@socket, written, remaining, "write timeout")
+              else
+                raise ConnectionError, "connection closed while writing" if written == 0
 
-              offset += written
+                chunk_offset += written
+              end
             end
+            out_offset += chunk.bytesize
           end
         end
       end
@@ -221,7 +228,6 @@ module ChConnect
       load_native_extension
       compression_code = validate_compression!
       @codec_name = (compression_code == 0) ? nil : config.compression.to_s
-      @codec_pin = @codec_name && ["network_compression_method", @codec_name].freeze
       @pool = ConnectionPool.new(size: config.pool_size, timeout: config.pool_timeout) do
         Slot.new(config, compression_code)
       end
@@ -236,11 +242,12 @@ module ChConnect
     # @return [Response] fully parsed response
     # @raise [QueryError] if the query fails
     def query(sql, options = {})
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       params = format_params(options[:params])
       settings = format_settings(options[:settings])
       retries = 0
 
-      begin
+      response = begin
         @pool.with do |slot|
           columns, types, rows, summary = slot.query(sql, params, settings)
           Response.new(columns: columns, types: types, rows: rows, summary: summary)
@@ -252,6 +259,8 @@ module ChConnect
       rescue ConnectionPool::TimeoutError => e
         raise ConnectionError, "could not obtain a TCP connection from the pool: #{e.message}"
       end
+      response.summary[:elapsed_ns] = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1_000_000_000).to_i.to_s
+      response
     end
 
     # Closes all pooled connections.
@@ -268,7 +277,7 @@ module ChConnect
 
       require "ch_connect/ch_connect_native"
     rescue LoadError => e
-      raise Error, "transport = :native requires the compiled ch_connect_native extension: #{e.message}"
+      raise Error, "ch_connect requires the compiled ch_connect_native extension: #{e.message}"
     end
 
     def validate_compression!
@@ -285,8 +294,8 @@ module ChConnect
     end
 
     # Converts params into native protocol substitutions. The public API uses
-    # the ClickHouse HTTP convention (param_<name> => value), so the prefix is
-    # stripped here to recover the bare substitution name. Values go through
+    # param_<name> keys, so the prefix is stripped here to recover the bare
+    # substitution name. Values go through
     # Field::restoreFromDump on the server, so everything is sent as a quoted
     # string and converted by the placeholder type (same convention as
     # clickhouse-cpp).
@@ -304,17 +313,18 @@ module ChConnect
       # protocol (the dump parser consumes the first escape layer).
       return "'\\\\N'" if value.nil?
 
-      "'#{value.to_s.gsub(/['\\]/) { |c| "\\#{c}" }}'"
+      inner_dump = value.to_s.gsub(PARAM_ESCAPE_PATTERN, PARAM_ESCAPES)
+      outer_dump = inner_dump.gsub(/['\\]/) { |char| "\\#{char}" }
+      "'#{outer_dump}'"
     end
 
     # Settings travel as name/value strings in the Query packet. The wire's
     # compression flag is boolean and the server picks the response codec
-    # from network_compression_method, so when compression is on we pin it
-    # to the registered codec; an explicit user override must name a codec
-    # this build can decode.
+    # from network_compression_method, so when compression is on we set its
+    # default to the configured codec.
     def format_settings(user_settings)
       settings = []
-      settings << @codec_pin if @codec_pin
+      settings << ["network_compression_method", @codec_name] if @codec_name
 
       user_settings&.each do |key, value|
         name = key.to_s
@@ -323,22 +333,10 @@ module ChConnect
         when false then "0"
         else value.to_s
         end
-        validate_codec_override!(formatted) if name == "network_compression_method"
         settings << [name, formatted]
       end
 
       settings.empty? ? nil : settings
-    end
-
-    def validate_codec_override!(codec)
-      return unless @codec_name # compression off: responses are uncompressed anyway
-
-      available = []
-      available << "lz4" if NativeClient::LZ4_AVAILABLE
-      available << "zstd" if NativeClient::ZSTD_AVAILABLE
-      return if available.include?(codec.downcase)
-
-      raise Error, "network_compression_method #{codec.inspect} is not decodable by this build (available: #{available.join(", ")})"
     end
   end
 end

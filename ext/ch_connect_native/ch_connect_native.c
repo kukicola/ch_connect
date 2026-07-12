@@ -9,7 +9,7 @@
  *   handshake_step / recv_step -> :done | :want_read
  * All calls are short and non-blocking, so the GVL is never released and
  * interrupts can only fire between calls. Result blocks are decoded in C
- * into Ruby objects matching ChConnect::NativeFormatParser's output exactly.
+ * into Ruby objects used by ChConnect::Response.
  */
 
 #include <ruby.h>
@@ -157,7 +157,9 @@ static VALUE
 decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state *state)
 {
     size_t es = 0;
-    const uint8_t *data = (const uint8_t *)chc_column_fixed_data(col, &es);
+    const uint8_t *data = n_rows > 0
+        ? (const uint8_t *)chc_column_fixed_data(col, &es)
+        : NULL;
     VALUE ary = rb_ary_new_capa(n_rows);
     chc_kind kind = chc_type_kind(t);
 
@@ -209,7 +211,7 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
         break;
     }
     case CHC_INT64:
-    case CHC_INTERVAL: {
+    {
         for (long i = 0; i < n_rows; i++) {
             int64_t v = load_i64le(data + i * 8);
             rb_ary_push(ary, LL2NUM(v));
@@ -374,7 +376,18 @@ decode_string_column(const chc_column *col, long n_rows)
 static VALUE
 decode_column(const chc_column *col, const chc_type *t, long n_rows, native_state *state)
 {
-    if (n_rows == 0) return rb_ary_new();
+    if (n_rows == 0) {
+        chc_kind kind = chc_type_kind(t);
+        if (kind == CHC_STRING) return rb_ary_new();
+        if (kind == CHC_NULLABLE || kind == CHC_ARRAY ||
+            kind == CHC_TUPLE || kind == CHC_MAP ||
+            kind == CHC_LOW_CARDINALITY) {
+            for (size_t i = 0; i < chc_type_n_children(t); i++)
+                decode_column(NULL, chc_type_child(t, i), 0, state);
+            return rb_ary_new();
+        }
+        return decode_fixed(NULL, t, 0, state);
+    }
 
     switch (chc_column_layout(col)) {
     case CHC_COL_FIXED:
@@ -412,6 +425,12 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
             uint64_t start = 0;
             for (long i = 0; i < n_rows; i++) {
                 uint64_t end = offsets[i];
+                if (end > (uint64_t)RARRAY_LEN(keys) || end > (uint64_t)RARRAY_LEN(vals)) {
+                    *state = NATIVE_BROKEN;
+                    rb_raise(eConnectionError,
+                             "Map offset out of bounds at row %ld: %llu", i,
+                             (unsigned long long)end);
+                }
                 VALUE hash = rb_hash_new();
                 for (uint64_t j = start; j < end; j++) {
                     rb_hash_aset(hash, RARRAY_AREF(keys, (long)j), RARRAY_AREF(vals, (long)j));
@@ -476,55 +495,9 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
         return ary;
     }
 
-    case CHC_COL_NOTHING: {
-        VALUE ary = rb_ary_new_capa(n_rows);
-        for (long i = 0; i < n_rows; i++) rb_ary_push(ary, Qnil);
-        return ary;
-    }
-
     default:
         raise_unsupported_type(t, state);
     }
-}
-
-/* Reject types the Ruby-value decoder can't handle before decoding rows. */
-static const char *
-find_unsupported_type(const chc_type *t, size_t *out_len)
-{
-    switch (chc_type_kind(t)) {
-    /* Composite kinds supported recursively by decode_column. */
-    case CHC_NULLABLE:
-    case CHC_ARRAY:
-    case CHC_TUPLE:
-    case CHC_MAP:
-    case CHC_LOW_CARDINALITY:
-        break;
-
-    /* Fixed and scalar layouts handled by decode_fixed/string/nothing. */
-    case CHC_VOID:
-    case CHC_INT8: case CHC_INT16: case CHC_INT32: case CHC_INT64:
-    case CHC_INT128: case CHC_INT256:
-    case CHC_UINT8: case CHC_UINT16: case CHC_UINT32: case CHC_UINT64:
-    case CHC_UINT128: case CHC_UINT256:
-    case CHC_FLOAT32: case CHC_FLOAT64: case CHC_BOOL:
-    case CHC_DATE: case CHC_DATE32: case CHC_DATETIME: case CHC_DATETIME64:
-    case CHC_STRING: case CHC_FIXED_STRING:
-    case CHC_DECIMAL32: case CHC_DECIMAL64: case CHC_DECIMAL128: case CHC_DECIMAL256:
-    case CHC_UUID: case CHC_IPV4: case CHC_IPV6:
-    case CHC_ENUM8: case CHC_ENUM16: case CHC_INTERVAL: case CHC_NOTHING:
-        return NULL;
-
-    /* Everything else is rejected before Ruby decoding starts. This includes
-     * BFloat16, Time/Time64, Nested, geo types, Variant/Dynamic/JSON/Object,
-     * aggregate states, SimpleAggregateFunction and QBit. */
-    default:
-        return chc_type_name(t, out_len);
-    }
-    for (size_t i = 0; i < chc_type_n_children(t); i++) {
-        const char *bad = find_unsupported_type(chc_type_child(t, i), out_len);
-        if (bad) return bad;
-    }
-    return NULL;
 }
 
 /* --- ioless client ------------------------------------------------------ */
@@ -768,6 +741,17 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
     size_t n_rows = chc_block_n_rows(block);
     size_t n_cols = chc_block_n_columns(block);
 
+    for (size_t i = 0; i < n_cols; i++) {
+        chc_err err = {0};
+        if (chc_column_validate(chc_block_column(block, i), &err) != CHC_OK) {
+            VALUE msg = rb_sprintf("Invalid native column: %s",
+                                   err.msg[0] ? err.msg : "column validation failed");
+            clear_pending(nc);
+            nc->state = NATIVE_BROKEN;
+            rb_exc_raise(rb_exc_new_str(eConnectionError, msg));
+        }
+    }
+
     if (!nc->have_header && n_cols > 0) {
         nc->have_header = 1;
         VALUE columns = rb_iv_get(self, "@columns");
@@ -782,18 +766,8 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
             const char *tname = chc_type_name(t, &tlen);
             rb_ary_push(types, rb_str_intern(rb_utf8_str_new(tname, (long)tlen)));
 
-            size_t badlen = 0;
-            const char *bad = find_unsupported_type(t, &badlen);
-            if (bad) {
-                VALUE msg = rb_sprintf("Unsupported column type: %.*s", (int)badlen, bad);
-                clear_pending(nc);
-                nc->state = NATIVE_BROKEN;
-                rb_exc_raise(rb_exc_new_str(eUnsupportedTypeError, msg));
-            }
         }
     }
-
-    if (n_rows == 0) return;
 
     VALUE rows = rb_iv_get(self, "@rows");
     /* Decode all columns of this block, then append transposed rows. col_vals
@@ -848,6 +822,9 @@ native_client_recv_step(VALUE self)
             VALUE msg = rb_utf8_str_new(pkt.exception->display_text,
                                         (long)pkt.exception->display_text_len);
             clear_pending(nc);
+            rb_iv_set(self, "@columns", Qnil);
+            rb_iv_set(self, "@types", Qnil);
+            rb_iv_set(self, "@rows", Qnil);
             /* A complete server exception terminates this query but leaves the
              * native protocol synchronized and ready for the next query. */
             nc->state = NATIVE_READY;
@@ -878,10 +855,7 @@ native_client_recv_step(VALUE self)
             nc->state = NATIVE_READY;
             return sym_done;
         }
-        /* PONG / TOTALS / EXTREMES / LOG / PROFILE_EVENTS — skip.
-         * Native-over-HTTP does not serialize totals or extremes into the
-         * response body either, so returning ordinary result rows keeps the
-         * two transports consistent. */
+        /* PONG / TOTALS / EXTREMES / LOG / PROFILE_EVENTS — skip. */
     }
 }
 
@@ -891,6 +865,9 @@ native_client_take_result(VALUE self)
     native_client_t *nc = get_client(self);
 
     VALUE rows = rb_iv_get(self, "@rows");
+    if (NIL_P(rows))
+        rb_raise(eConnectionError, "no completed native result is available");
+
     VALUE summary = rb_hash_new();
     rb_hash_aset(summary, sym_read_rows, rb_obj_as_string(ULL2NUM(nc->read_rows)));
     rb_hash_aset(summary, sym_read_bytes, rb_obj_as_string(ULL2NUM(nc->read_bytes)));

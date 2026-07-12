@@ -6,8 +6,7 @@ Benchmark suite comparing `ch_connect` against other ClickHouse Ruby gems.
 
 | Gem | Format | Transport | Repository |
 |-----|--------|-----------|------------|
-| ch_connect | Native | HTTP (HTTPX) | This gem |
-| ch_connect (TCP) | Native + LZ4 | Native TCP protocol (C extension) | This gem |
+| ch_connect | Native + LZ4 | Native TCP protocol (C extension) | This gem |
 | click_house | JSON | HTTP (Faraday) | [shlima/click_house](https://github.com/shlima/click_house) |
 | clickhouse | JSONCompact | HTTP (Faraday) | [archan937/clickhouse](https://github.com/archan937/clickhouse) |
 | click_house-client | JSON | HTTP (Net::HTTP) | [GitLab](https://gitlab.com/gitlab-org/ruby/gems/clickhouse-client) |
@@ -15,7 +14,7 @@ Benchmark suite comparing `ch_connect` against other ClickHouse Ruby gems.
 ## Prerequisites
 
 - Ruby 3.2+
-- ClickHouse server on `localhost:8123` (HTTP) and `localhost:9000` (native TCP)
+- ClickHouse server on `localhost:9000` (native TCP) and `localhost:8123` (HTTP competitors)
 - Credentials `default`/`default`
 - The compiled native extension (`cd ext/ch_connect_native && ruby extconf.rb && make && cp ch_connect_native.$(ruby -rrbconfig -e 'print RbConfig::CONFIG["DLEXT"]') ../../lib/ch_connect/`)
 

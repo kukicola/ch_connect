@@ -4,8 +4,8 @@ require_relative "../benchmark_helper"
 require_relative "../adapters"
 
 # Multi-threaded throughput: total queries/second across N worker threads.
-# ch_connect HTTP uses the HTTPX pool; ch_connect TCP uses its native
-# connection pool; the other gems use their default connection handling.
+# ch_connect uses its native connection pool; the other gems use their default
+# connection handling.
 
 THREAD_COUNTS = [1, 4, 8]
 DURATION = 4 # seconds per measurement

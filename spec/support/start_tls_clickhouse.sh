@@ -4,7 +4,7 @@
 # Usage: spec/support/start_tls_clickhouse.sh <cert_dir> [password]
 #
 # Then run the specs with:
-#   CH_TRANSPORT=native CH_TLS_PORT=9440 CH_TLS_CA=<cert_dir>/server.crt bundle exec rspec
+#   CH_TLS_PORT=9440 CH_TLS_CA=<cert_dir>/server.crt bundle exec rspec
 set -euo pipefail
 
 CERT_DIR="${1:?usage: $0 <cert_dir> [password]}"

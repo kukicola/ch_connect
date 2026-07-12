@@ -2,38 +2,46 @@
 
 RSpec.describe ChConnect::TcpTransport do
   let(:config) do
-    ChConnect::Config.new(
-      host: ChConnect.config.host,
-      port: ENV.fetch("CLICKHOUSE_TCP_PORT", 9000).to_i,
-      database: ChConnect.config.database,
-      username: ChConnect.config.username,
-      password: ChConnect.config.password,
-      transport: :native
-    )
+    ChConnect.config.dup
   end
   let(:transport) { @transport = described_class.new(config) }
 
   after { @transport&.close }
 
   describe "#query" do
-    it_behaves_like "a ClickHouse transport"
-
     it "recovers the pooled connection after a server error" do
       transport # load the extension before installing the constructor spy
-      allow(ChConnect::NativeClient).to receive(:new).and_call_original
+      native_client = nil
+      allow(ChConnect::NativeClient).to receive(:new).and_wrap_original do |method, *args|
+        native_client = method.call(*args)
+      end
 
       expect { transport.query("SELECT bad_column FROM system.one") }
         .to raise_error(ChConnect::QueryError)
+      expect(native_client.instance_variables.to_h { |ivar| [ivar, native_client.instance_variable_get(ivar)] })
+        .to include(:@columns => nil, :@types => nil, :@rows => nil)
 
       expect(transport.query("SELECT 2 AS two").rows).to eq([[2]])
       expect(ChConnect::NativeClient).to have_received(:new).once
     end
 
-    it "rejects unsupported fixed types before Ruby decoding and recovers" do
+    it "rejects unsupported fixed types and recovers" do
       expect { transport.query("SELECT toBFloat16(1)") }
         .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
 
       expect(transport.query("SELECT 42 AS answer").rows).to eq([[42]])
+    end
+
+    it "rejects unsupported types in empty result sets" do
+      expect { transport.query("SELECT toBFloat16(number) FROM numbers(0)") }
+        .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
+    end
+
+    it "rejects Nothing and Interval values" do
+      expect { transport.query("SELECT NULL AS value") }
+        .to raise_error(ChConnect::UnsupportedTypeError, /Nothing/)
+      expect { transport.query("SELECT INTERVAL 1 DAY AS value") }
+        .to raise_error(ChConnect::UnsupportedTypeError, /Interval/)
     end
 
     it "survives compacting GC while serializing query parameters" do
@@ -67,6 +75,38 @@ RSpec.describe ChConnect::TcpTransport do
         expect(results[i]).to eq([[i, expected_sum]])
       end
     end
+
+    it "reopens inherited native connections after fork" do
+      skip "fork is unavailable" unless Process.respond_to?(:fork)
+
+      transport.query("SELECT 1")
+      pool = transport.instance_variable_get(:@pool)
+      parent_port = pool.with { |slot| slot.instance_variable_get(:@socket).local_address.ip_port }
+      reader, writer = IO.pipe
+      pid = fork do
+        reader.close
+        begin
+          transport.query("SELECT 1")
+          child_port = pool.with { |slot| slot.instance_variable_get(:@socket).local_address.ip_port }
+          Marshal.dump([:ok, child_port], writer)
+        rescue => e
+          Marshal.dump([:error, "#{e.class}: #{e.message}"], writer)
+        ensure
+          writer.close
+        end
+        exit! 0
+      end
+      writer.close
+      status, payload = Marshal.load(reader)
+      Process.wait(pid)
+
+      expect(status).to eq(:ok), "child query failed: #{payload}"
+      expect(payload).not_to eq(parent_port)
+      expect(transport.query("SELECT 1").rows).to eq([[1]])
+    ensure
+      reader&.close
+      writer&.close
+    end
   end
 
   describe "compression" do
@@ -92,18 +132,10 @@ RSpec.describe ChConnect::TcpTransport do
       response = transport.query("SELECT 1 AS one", settings: {network_compression_method: "zstd"})
       expect(response.rows).to eq([[1]])
     end
-
-    it "rejects a network_compression_method override this build cannot decode" do
-      stub_const("ChConnect::NativeClient::ZSTD_AVAILABLE", false)
-
-      expect {
-        transport.query("SELECT 1", settings: {network_compression_method: "zstd"})
-      }.to raise_error(ChConnect::Error, /not decodable by this build/)
-    end
   end
 
   describe "summary" do
-    it "uses the same string value types as the HTTP transport" do
+    it "uses string values" do
       transport # load the native extension without opening a socket
       client = ChConnect::NativeClient.new("default", "default", "", 0)
       client.instance_variable_set(:@columns, [])
@@ -113,6 +145,8 @@ RSpec.describe ChConnect::TcpTransport do
       summary = client.take_result.last
 
       expect(summary.values).to all(be_a(String))
+      expect { client.take_result }
+        .to raise_error(ChConnect::ConnectionError, /no completed native result/)
     ensure
       client&.close
     end
@@ -190,7 +224,7 @@ RSpec.describe ChConnect::TcpTransport do
       accepter = Thread.new { silent_server.accept }
 
       silent_config = ChConnect::Config.new(
-        host: "127.0.0.1", port: port, transport: :native,
+        host: "127.0.0.1", port: port,
         connection_timeout: 0.5, max_retries: 0
       )
       silent_transport = described_class.new(silent_config)
@@ -207,7 +241,7 @@ RSpec.describe ChConnect::TcpTransport do
 
     it "times out connecting to an unroutable address" do
       dead_config = ChConnect::Config.new(
-        host: "10.255.255.1", port: 9000, transport: :native,
+        host: "10.255.255.1", port: 9000,
         connection_timeout: 0.5, max_retries: 0
       )
       dead_transport = described_class.new(dead_config)
@@ -293,11 +327,12 @@ RSpec.describe ChConnect::TcpTransport do
 
   describe "TLS", if: ENV["CH_TLS_PORT"] do
     it "queries over TLS with CA verification" do
-      tls_config = ChConnect::Config.new(
-        host: config.host, port: Integer(ENV["CH_TLS_PORT"]),
-        username: config.username, password: config.password,
-        transport: :native, ssl: true, ssl_verify: true, ssl_ca: ENV.fetch("CH_TLS_CA")
-      )
+      tls_config = config.dup.tap do |c|
+        c.port = Integer(ENV["CH_TLS_PORT"])
+        c.ssl = true
+        c.ssl_verify = true
+        c.ssl_ca = ENV.fetch("CH_TLS_CA")
+      end
       tls_transport = described_class.new(tls_config)
 
       expect(tls_transport.query("SELECT 1 AS one").rows).to eq([[1]])
@@ -306,11 +341,12 @@ RSpec.describe ChConnect::TcpTransport do
     end
 
     it "rejects an unverifiable certificate against the system store" do
-      tls_config = ChConnect::Config.new(
-        host: config.host, port: Integer(ENV["CH_TLS_PORT"]),
-        username: config.username, password: config.password,
-        transport: :native, ssl: true, ssl_verify: true, max_retries: 0
-      )
+      tls_config = config.dup.tap do |c|
+        c.port = Integer(ENV["CH_TLS_PORT"])
+        c.ssl = true
+        c.ssl_verify = true
+        c.max_retries = 0
+      end
       tls_transport = described_class.new(tls_config)
 
       expect { tls_transport.query("SELECT 1") }
@@ -341,7 +377,7 @@ RSpec.describe ChConnect::TcpTransport do
 
   describe "parameter formatting" do
     it "quotes string values and strips the param_ prefix" do
-      expect(transport.send(:format_params, {param_name: "al'ice"})).to eq([["name", "'al\\'ice'"]])
+      expect(transport.send(:format_params, {param_name: "al'ice"})).to eq([["name", "'al\\\\\\'ice'"]])
     end
 
     it "quotes numeric values as strings" do
@@ -350,6 +386,17 @@ RSpec.describe ChConnect::TcpTransport do
 
     it "converts nil to the native nullable dump marker" do
       expect(transport.send(:format_params, {param_x: nil})).to eq([["x", "'\\\\N'"]])
+    end
+
+    it "escapes binary and control bytes for Field dump strings" do
+      value = "nul:\0 bell:\a back:\b esc:\e form:\f line:\n return:\r tab:\t vert:\v quote:' slash:\\"
+      response = transport.query(
+        "SELECT {value:String} AS value",
+        params: {param_value: value}
+      )
+
+      expect(response.rows).to eq([[value]])
+      expect(transport.send(:format_params, {param_value: "a\0b"}).dig(0, 1)).to eq("'a\\\\0b'")
     end
 
     it "returns nil for empty params" do
