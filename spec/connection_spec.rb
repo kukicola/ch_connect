@@ -1,46 +1,45 @@
 # frozen_string_literal: true
 
-RSpec.describe ChConnect::TcpTransport do
+RSpec.describe ChConnect::Connection do
   let(:config) do
     ChConnect.config.dup
   end
-  let(:transport) { @transport = described_class.new(config) }
+  let(:connection) { @connection = described_class.new(config) }
 
-  after { @transport&.close }
+  after { @connection&.close }
 
   describe "#query" do
     it "recovers the pooled connection after a server error" do
-      transport # load the extension before installing the constructor spy
       native_client = nil
       allow(ChConnect::NativeClient).to receive(:new).and_wrap_original do |method, *args|
         native_client = method.call(*args)
       end
 
-      expect { transport.query("SELECT bad_column FROM system.one") }
+      expect { connection.query("SELECT bad_column FROM system.one") }
         .to raise_error(ChConnect::QueryError)
       expect(native_client.instance_variables.to_h { |ivar| [ivar, native_client.instance_variable_get(ivar)] })
         .to include(:@columns => nil, :@types => nil, :@rows => nil)
 
-      expect(transport.query("SELECT 2 AS two").rows).to eq([[2]])
+      expect(connection.query("SELECT 2 AS two").rows).to eq([[2]])
       expect(ChConnect::NativeClient).to have_received(:new).once
     end
 
     it "rejects unsupported fixed types and recovers" do
-      expect { transport.query("SELECT toBFloat16(1)") }
+      expect { connection.query("SELECT toBFloat16(1)") }
         .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
 
-      expect(transport.query("SELECT 42 AS answer").rows).to eq([[42]])
+      expect(connection.query("SELECT 42 AS answer").rows).to eq([[42]])
     end
 
     it "rejects unsupported types in empty result sets" do
-      expect { transport.query("SELECT toBFloat16(number) FROM numbers(0)") }
+      expect { connection.query("SELECT toBFloat16(number) FROM numbers(0)") }
         .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
     end
 
     it "rejects Nothing and Interval values" do
-      expect { transport.query("SELECT NULL AS value") }
+      expect { connection.query("SELECT NULL AS value") }
         .to raise_error(ChConnect::UnsupportedTypeError, /Nothing/)
-      expect { transport.query("SELECT INTERVAL 1 DAY AS value") }
+      expect { connection.query("SELECT INTERVAL 1 DAY AS value") }
         .to raise_error(ChConnect::UnsupportedTypeError, /Interval/)
     end
 
@@ -54,7 +53,7 @@ RSpec.describe ChConnect::TcpTransport do
       GC.auto_compact = true
       GC.stress = true
 
-      expect(transport.query("SELECT {target:String} AS target", params: params).rows)
+      expect(connection.query("SELECT {target:String} AS target", params: params).rows)
         .to eq([["safe"]])
     ensure
       GC.stress = previous_stress unless previous_stress.nil?
@@ -65,7 +64,7 @@ RSpec.describe ChConnect::TcpTransport do
       results = Array.new(8)
       threads = 8.times.map do |i|
         Thread.new do
-          results[i] = transport.query("SELECT #{i} AS n, sum(number) AS s FROM numbers(#{10 + i})").rows
+          results[i] = connection.query("SELECT #{i} AS n, sum(number) AS s FROM numbers(#{10 + i})").rows
         end
       end
       threads.each(&:join)
@@ -79,14 +78,14 @@ RSpec.describe ChConnect::TcpTransport do
     it "reopens inherited native connections after fork" do
       skip "fork is unavailable" unless Process.respond_to?(:fork)
 
-      transport.query("SELECT 1")
-      pool = transport.instance_variable_get(:@pool)
+      connection.query("SELECT 1")
+      pool = connection.instance_variable_get(:@pool)
       parent_port = pool.with { |slot| slot.instance_variable_get(:@socket).local_address.ip_port }
       reader, writer = IO.pipe
       pid = fork do
         reader.close
         begin
-          transport.query("SELECT 1")
+          connection.query("SELECT 1")
           child_port = pool.with { |slot| slot.instance_variable_get(:@socket).local_address.ip_port }
           Marshal.dump([:ok, child_port], writer)
         rescue => e
@@ -102,7 +101,7 @@ RSpec.describe ChConnect::TcpTransport do
 
       expect(status).to eq(:ok), "child query failed: #{payload}"
       expect(payload).not_to eq(parent_port)
-      expect(transport.query("SELECT 1").rows).to eq([[1]])
+      expect(connection.query("SELECT 1").rows).to eq([[1]])
     ensure
       reader&.close
       writer&.close
@@ -129,14 +128,13 @@ RSpec.describe ChConnect::TcpTransport do
     it "allows overriding network_compression_method to an available codec" do
       skip "zstd not built" unless ChConnect::NativeClient::ZSTD_AVAILABLE
 
-      response = transport.query("SELECT 1 AS one", settings: {network_compression_method: "zstd"})
+      response = connection.query("SELECT 1 AS one", settings: {network_compression_method: "zstd"})
       expect(response.rows).to eq([[1]])
     end
   end
 
   describe "summary" do
     it "uses string values" do
-      transport # load the native extension without opening a socket
       client = ChConnect::NativeClient.new("default", "default", "", 0)
       client.instance_variable_set(:@columns, [])
       client.instance_variable_set(:@types, [])
@@ -227,14 +225,14 @@ RSpec.describe ChConnect::TcpTransport do
         host: "127.0.0.1", port: port,
         connection_timeout: 0.5, max_retries: 0
       )
-      silent_transport = described_class.new(silent_config)
+      silent_connection = described_class.new(silent_config)
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      expect { silent_transport.query("SELECT 1") }
+      expect { silent_connection.query("SELECT 1") }
         .to raise_error(ChConnect::ConnectionError, /read timeout/)
       expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 5
     ensure
-      silent_transport&.close
+      silent_connection&.close
       accepter&.kill
       silent_server&.close
     end
@@ -244,24 +242,18 @@ RSpec.describe ChConnect::TcpTransport do
         host: "10.255.255.1", port: 9000,
         connection_timeout: 0.5, max_retries: 0
       )
-      dead_transport = described_class.new(dead_config)
+      dead_connection = described_class.new(dead_config)
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      expect { dead_transport.query("SELECT 1") }.to raise_error(ChConnect::ConnectionError)
+      expect { dead_connection.query("SELECT 1") }.to raise_error(ChConnect::ConnectionError)
       expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 5
     ensure
-      dead_transport&.close
+      dead_connection&.close
     end
   end
 
   describe "retries" do
     let(:retry_config) { config.dup.tap { |c| c.max_retries = 3 } }
-
-    before do
-      # ensure the extension (and thus the NativeClient constant) is loaded
-      # through the public path before stubbing it
-      described_class.new(retry_config).close
-    end
 
     def fake_client
       double("NativeClient", close: nil, broken?: false,
@@ -298,13 +290,13 @@ RSpec.describe ChConnect::TcpTransport do
       # note: the query must actually use the sleep column — the optimizer
       # prunes unused sleepEachRow calls and the query returns instantly
       worker = Thread.new do
-        transport.query("SELECT sleep(3)")
+        connection.query("SELECT sleep(3)")
       end
       sleep 0.5 # let the query get in flight
       worker.kill
       worker.join
 
-      expect(transport.query("SELECT 41 + 1 AS x").rows).to eq([[42]])
+      expect(connection.query("SELECT 41 + 1 AS x").rows).to eq([[42]])
     end
 
     it "does not hold the GVL while waiting on the server" do
@@ -316,7 +308,7 @@ RSpec.describe ChConnect::TcpTransport do
         end
       end
 
-      transport.query("SELECT sleep(1)")
+      connection.query("SELECT sleep(1)")
       ticker.kill
       ticker.join
 
@@ -333,11 +325,11 @@ RSpec.describe ChConnect::TcpTransport do
         c.ssl_verify = true
         c.ssl_ca = ENV.fetch("CH_TLS_CA")
       end
-      tls_transport = described_class.new(tls_config)
+      tls_connection = described_class.new(tls_config)
 
-      expect(tls_transport.query("SELECT 1 AS one").rows).to eq([[1]])
+      expect(tls_connection.query("SELECT 1 AS one").rows).to eq([[1]])
     ensure
-      tls_transport&.close
+      tls_connection&.close
     end
 
     it "rejects an unverifiable certificate against the system store" do
@@ -347,12 +339,12 @@ RSpec.describe ChConnect::TcpTransport do
         c.ssl_verify = true
         c.max_retries = 0
       end
-      tls_transport = described_class.new(tls_config)
+      tls_connection = described_class.new(tls_config)
 
-      expect { tls_transport.query("SELECT 1") }
+      expect { tls_connection.query("SELECT 1") }
         .to raise_error(ChConnect::ConnectionError, /certificate verify/)
     ensure
-      tls_transport&.close
+      tls_connection&.close
     end
   end
 
@@ -360,48 +352,48 @@ RSpec.describe ChConnect::TcpTransport do
     it "handles a URL without credentials" do
       url_config = ChConnect::Config.new
       url_config.url = "clickhouse://#{config.host}:#{config.port}/default"
-      url_transport = described_class.new(url_config)
+      url_connection = described_class.new(url_config)
 
       # must not crash on nil credentials; auth outcome depends on the server
       expect {
         begin
-          url_transport.query("SELECT 1")
+          url_connection.query("SELECT 1")
         rescue ChConnect::Error
           nil
         end
       }.not_to raise_error
     ensure
-      url_transport&.close
+      url_connection&.close
     end
   end
 
   describe "parameter formatting" do
     it "quotes string values and strips the param_ prefix" do
-      expect(transport.send(:format_params, {param_name: "al'ice"})).to eq([["name", "'al\\\\\\'ice'"]])
+      expect(connection.send(:format_params, {param_name: "al'ice"})).to eq([["name", "'al\\\\\\'ice'"]])
     end
 
     it "quotes numeric values as strings" do
-      expect(transport.send(:format_params, {param_id: 42})).to eq([["id", "'42'"]])
+      expect(connection.send(:format_params, {param_id: 42})).to eq([["id", "'42'"]])
     end
 
     it "converts nil to the native nullable dump marker" do
-      expect(transport.send(:format_params, {param_x: nil})).to eq([["x", "'\\\\N'"]])
+      expect(connection.send(:format_params, {param_x: nil})).to eq([["x", "'\\\\N'"]])
     end
 
     it "escapes binary and control bytes for Field dump strings" do
       value = "nul:\0 bell:\a back:\b esc:\e form:\f line:\n return:\r tab:\t vert:\v quote:' slash:\\"
-      response = transport.query(
+      response = connection.query(
         "SELECT {value:String} AS value",
         params: {param_value: value}
       )
 
       expect(response.rows).to eq([[value]])
-      expect(transport.send(:format_params, {param_value: "a\0b"}).dig(0, 1)).to eq("'a\\\\0b'")
+      expect(connection.send(:format_params, {param_value: "a\0b"}).dig(0, 1)).to eq("'a\\\\0b'")
     end
 
     it "returns nil for empty params" do
-      expect(transport.send(:format_params, nil)).to be_nil
-      expect(transport.send(:format_params, {})).to be_nil
+      expect(connection.send(:format_params, nil)).to be_nil
+      expect(connection.send(:format_params, {})).to be_nil
     end
   end
 end

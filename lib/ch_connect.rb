@@ -3,8 +3,6 @@
 require_relative "ch_connect/version"
 require_relative "ch_connect/null_instrumenter"
 require_relative "ch_connect/config"
-require_relative "ch_connect/tcp_transport"
-require_relative "ch_connect/connection"
 require_relative "ch_connect/response"
 
 # Ruby client for ClickHouse database with Native format support.
@@ -45,3 +43,11 @@ module ChConnect
     yield(config) if block_given?
   end
 end
+
+begin
+  require "ch_connect/ch_connect_native"
+rescue LoadError => e
+  raise ChConnect::Error, "ch_connect requires the compiled native extension: #{e.message}"
+end
+
+require_relative "ch_connect/connection"
