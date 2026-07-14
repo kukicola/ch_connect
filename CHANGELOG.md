@@ -1,18 +1,10 @@
 ## Unreleased
 
-- Switched all connections to ClickHouse's native TCP protocol and removed the HTTP/HTTPX transport
-- Added a C extension over vendored [clickhouse-c](https://github.com/ClickHouse/clickhouse-c); it provides an ioless protocol state machine and block decoder while socket I/O remains in Ruby
-- Added connection pooling via `connection_pool`, LZ4/ZSTD block compression (`config.compression`, default `:lz4`), TLS (`config.ssl`, `config.ssl_verify`, `config.ssl_ca`), connect/read/write timeouts and interruptible socket I/O
-- Native URL schemes (`clickhouse://`, `clickhouses://`, `tcp://`, `tcps://`) configure TCP port, TLS, credentials and database
-- Added per-query ClickHouse settings: `conn.query(sql, settings: {max_threads: 1})`
-- New config options: `compression`, `ssl`, `ssl_verify`, `ssl_ca`
-- New dependency: `connection_pool` (~> 2.4)
-- Connection failures raise `ChConnect::ConnectionError`; `QueryError` remains for server-side query errors
-- Queries are retried only when connection establishment fails; failures after query transmission begins are returned without retrying to avoid duplicating non-idempotent statements
-- `summary[:client_elapsed_ns]` reports end-to-end client time; the old HTTP server metric `summary[:elapsed_ns]` is no longer available
-- `params:` now accepts only `param_`-prefixed native query parameters; move ClickHouse settings to `settings:` and configure the database on the connection
-- Removed HTTP configuration options `scheme` and `transport` (`transport: :native` remains an accepted no-op for migration); existing port 8123/8443 configurations must move to a native TCP port, normally 9000/9440
-- Restored `keep_alive_timeout` for recycling idle pooled native connections, with a TCP-appropriate default of 60 seconds
+- Switched from HTTP to ClickHouse's native TCP protocol for faster queries and lower allocations
+- Added connection pooling, LZ4/ZSTD compression, TLS, and native ClickHouse URLs
+- Added native query parameters and per-query ClickHouse settings
+- Improved connection timeouts, retries, fork safety, and idle connection handling
+- Removed HTTP configuration; existing connections must use native ports, normally 9000 or 9440
 
 ## [0.2.2] - 2026-05-06
 

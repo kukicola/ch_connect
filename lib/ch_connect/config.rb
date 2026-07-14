@@ -76,15 +76,9 @@ module ChConnect
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
     # @option params [Integer] :max_retries max retry attempts on connection errors (default: 3)
     def initialize(params = {})
-      DEFAULTS.each do |key, value|
-        send("#{key}=", value)
-      end
+      DEFAULTS.each { |key, value| public_send("#{key}=", value) }
       self.url = params[:url] if params[:url]
-      params.each do |key, value|
-        next if key == :url
-
-        send("#{key}=", value)
-      end
+      params.each { |key, value| public_send("#{key}=", value) unless key == :url }
     end
 
     # Returns the explicitly configured port or the default for the active
@@ -110,20 +104,6 @@ module ChConnect
       @database = database unless database.empty?
       @username = uri.user if uri.user
       @password = uri.password if uri.password
-    end
-
-    # HTTP schemes no longer configure a connection. Use a native URL or the
-    # ssl option instead.
-    def scheme=(_scheme)
-      raise ArgumentError, "scheme was removed; use a clickhouse:// or clickhouses:// URL, or set ssl"
-    end
-
-    # Native TCP is the only transport. Retain the previous explicit native
-    # selection as a harmless migration path while rejecting HTTP.
-    def transport=(transport)
-      return if transport == :native
-
-      raise ArgumentError, "transport was removed; ch_connect now supports only native TCP"
     end
 
     private

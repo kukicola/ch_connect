@@ -11,6 +11,7 @@ RSpec.describe ChConnect::Connection do
   describe "#query" do
     it "recovers the pooled connection after a server error" do
       native_client = nil
+      allow(described_class::Slot).to receive(:new).and_call_original
       allow(ChConnect::NativeClient).to receive(:new).and_wrap_original do |method, *args|
         native_client = method.call(*args)
       end
@@ -22,13 +23,17 @@ RSpec.describe ChConnect::Connection do
 
       expect(connection.query("SELECT 2 AS two").rows).to eq([[2]])
       expect(ChConnect::NativeClient).to have_received(:new).once
+      expect(described_class::Slot).to have_received(:new).once
     end
 
     it "rejects unsupported fixed types and recovers" do
+      allow(described_class::Slot).to receive(:new).and_call_original
+
       expect { connection.query("SELECT toBFloat16(1)") }
         .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
 
       expect(connection.query("SELECT 42 AS answer").rows).to eq([[42]])
+      expect(described_class::Slot).to have_received(:new).twice
     end
 
     it "rejects unsupported types in empty result sets" do
@@ -166,12 +171,12 @@ RSpec.describe ChConnect::Connection do
         c.pool_size = 1
       end
       idle_connection = described_class.new(idle_config)
-      allow(ChConnect::NativeClient).to receive(:new).and_call_original
+      allow(described_class::Slot).to receive(:new).and_call_original
 
       idle_connection.query("SELECT 1")
       idle_connection.query("SELECT 2")
 
-      expect(ChConnect::NativeClient).to have_received(:new).twice
+      expect(described_class::Slot).to have_received(:new).twice
     ensure
       idle_connection&.close
     end
@@ -286,6 +291,9 @@ RSpec.describe ChConnect::Connection do
       slot = double("Slot")
       error = described_class.const_get(:EstablishmentError, false)
       allow(pool).to receive(:with) { |&block| block.call(slot) }
+      allow(pool).to receive(:reap)
+      allow(pool).to receive(:discard_current_connection)
+      allow(slot).to receive(:broken?).and_return(true, true, false)
       attempts = 0
       allow(slot).to receive(:query) do
         attempts += 1
@@ -297,6 +305,8 @@ RSpec.describe ChConnect::Connection do
 
       expect(retrying.query("SELECT 1").rows).to eq([[1]])
       expect(slot).to have_received(:query).exactly(3).times
+      expect(pool).to have_received(:discard_current_connection).twice
+      expect(pool).to have_received(:reap).with(idle_seconds: 60).once
     end
 
     it "never retries a query after execution may have started" do
@@ -304,12 +314,16 @@ RSpec.describe ChConnect::Connection do
       pool = double("ConnectionPool")
       slot = double("Slot")
       allow(pool).to receive(:with) { |&block| block.call(slot) }
+      allow(pool).to receive(:reap)
+      allow(pool).to receive(:discard_current_connection)
       allow(slot).to receive(:query).and_raise(ChConnect::ConnectionError, "response lost")
+      allow(slot).to receive(:broken?).and_return(true)
       retrying.instance_variable_set(:@pool, pool)
 
       expect { retrying.query("INSERT INTO t VALUES (1)") }
         .to raise_error(ChConnect::ConnectionError, "response lost")
       expect(slot).to have_received(:query).once
+      expect(pool).to have_received(:discard_current_connection).once
     end
   end
 

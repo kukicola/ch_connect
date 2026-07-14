@@ -14,7 +14,35 @@ Fast MRI Ruby client for ClickHouse's native TCP protocol.
 - Interruptible connect, read, and write timeouts
 - Common ClickHouse scalar and composite types
 
-The native protocol avoids HTTP request/response overhead. In the current benchmark suite, a small query allocates approximately 3.2 KB / 32 Ruby objects, while a 100K-row typed query runs at approximately 8.2 iterations per second on Ruby 4.0.3. See `benchmark/` for the comparison suite and methodology.
+## Benchmarks
+
+Compared with [click_house](https://github.com/shlima/click_house), [clickhouse](https://github.com/archan937/clickhouse), and [click_house-client](https://gitlab.com/gitlab-org/ruby/gems/clickhouse-client) on Ruby 4.0.3. `ch_connect` uses its default LZ4 compression.
+
+Speed (iterations/second, higher is better):
+
+| Scenario | ch_connect | click_house | clickhouse | click_house-client |
+|----------|------------|-------------|------------|--------------------|
+| Small queries (10 rows) | **962 i/s** | 363 i/s (2.7x slower) | 317 i/s (3.0x slower) | 372 i/s (2.6x slower) |
+| Large queries (100K rows) | **8.2 i/s** | 1.1 i/s (7.2x slower) | 0.6 i/s (14.1x slower) | 1.5 i/s (5.3x slower) |
+
+Multi-threaded throughput (10K-row query, total queries/second):
+
+| Threads | ch_connect | click_house | clickhouse | click_house-client |
+|---------|------------|-------------|------------|--------------------|
+| 1 | **292 q/s** | 69 q/s | 117 q/s | 48 q/s |
+| 4 | **598 q/s** | 162 q/s | 319 q/s | 82 q/s |
+| 8 | **606 q/s** | 158 q/s | 321 q/s | 80 q/s |
+
+Memory allocated for a large query (lower is better):
+
+| Gem | Allocated |
+|-----|-----------|
+| ch_connect | **97 MB** |
+| click_house | 198 MB |
+| click_house-client | 210 MB |
+| clickhouse | 436 MB |
+
+A small query allocates approximately **3.2 KB / 32 Ruby objects**. See the [`benchmark/`](benchmark/) directory for the comparison suite and methodology.
 
 ## Installation
 

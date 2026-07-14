@@ -125,16 +125,5 @@ RSpec.describe ChConnect::Config do
       expect(config.host).to eq("new-host.example.com")
       expect(config.port).to eq(9999)
     end
-
-    it "accepts the previous explicit native transport selection" do
-      expect { described_class.new(transport: :native) }.not_to raise_error
-    end
-
-    it "explains removed HTTP configuration" do
-      expect { described_class.new(transport: :http) }
-        .to raise_error(ArgumentError, /only native TCP/)
-      expect { described_class.new(scheme: "https") }
-        .to raise_error(ArgumentError, /scheme was removed/)
-    end
   end
 end

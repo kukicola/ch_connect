@@ -11,10 +11,9 @@ require "uri"
 module Adapters
   # Adapter for ch_connect's native TCP protocol.
   class ChConnectAdapter
-    attr_reader :connection, :name
+    attr_reader :connection
 
     def initialize(config = {})
-      @name = :ch_connect
       ch_config = ChConnect::Config.new(
         host: config[:host] || "localhost",
         username: config[:username] || "default",
@@ -23,6 +22,7 @@ module Adapters
       @connection = ChConnect::Connection.new(ch_config)
     end
 
+    def name = :ch_connect
     def execute(sql) = @connection.query(sql)
     def result_to_array(result) = result.to_a
     def result_row_count(result) = result.rows.size

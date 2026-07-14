@@ -47,7 +47,6 @@ module ChConnect
         @socket = nil
         @client = nil
         @pid = Process.pid
-        @last_used_at = nil
         @read_buf = String.new(capacity: READ_CHUNK)
       end
 
@@ -62,31 +61,35 @@ module ChConnect
           when :want_read then @client.feed(read_chunk)
           end
         end
-        result = @client.take_result
-        @last_used_at = monotonic_now
-        result
+        @client.take_result
       rescue IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "#{e.class}: #{e.message}"
-      ensure
-        # a non-local exit (Thread#kill, Interrupt, Timeout) skips the rescues
-        # above but leaves the client mid-stream; close immediately.
-        discard if @client&.broken?
       end
 
+      def broken? = !@client || @client.broken? || @socket&.closed?
+
       def close
-        discard(inherited: @pid != Process.pid)
+        if @pid != Process.pid && @socket.is_a?(OpenSSL::SSL::SSLSocket)
+          # A fork duplicates the fd. Closing the SSLSocket would send a TLS
+          # close_notify on the parent's live session; close only this process's
+          # raw fd instead.
+          safe_close(@socket.to_io)
+        else
+          safe_close(@socket)
+        end
+        @client&.close
+        @socket = nil
+        @client = nil
       end
 
       private
 
       def ensure_connected
-        if @pid != Process.pid
-          discard(inherited: true)
-          @pid = Process.pid
+        if @client
+          raise EstablishmentError, "pooled connection is broken" if broken?
+
+          return
         end
-        discard if idle?
-        discard if @client&.broken? || @socket&.closed?
-        return if @client
 
         establish_connection
       end
@@ -100,9 +103,8 @@ module ChConnect
           @compression_code
         )
         handshake
-        @last_used_at = monotonic_now
       rescue ConnectionError, IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
-        discard
+        close
         raise EstablishmentError, "#{e.class}: #{e.message}"
       end
 
@@ -226,26 +228,6 @@ module ChConnect
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
-      def idle?
-        timeout = @config.keep_alive_timeout
-        @client && timeout && @last_used_at && monotonic_now - @last_used_at >= timeout
-      end
-
-      def discard(inherited: false)
-        if inherited && @socket.is_a?(OpenSSL::SSL::SSLSocket)
-          # A fork duplicates the fd. Closing the SSLSocket would send a TLS
-          # close_notify on the parent's live session; close only this process's
-          # raw fd instead.
-          safe_close(@socket.to_io)
-        else
-          safe_close(@socket)
-        end
-        @client&.close
-        @socket = nil
-        @client = nil
-        @last_used_at = nil
-      end
-
       def safe_close(io)
         io&.close
       rescue IOError, SystemCallError
@@ -263,7 +245,11 @@ module ChConnect
       @config = config
       compression_code = validate_compression!
       @codec_name = (compression_code == 0) ? nil : config.compression.to_s
-      @pool = ConnectionPool.new(size: config.pool_size, timeout: config.pool_timeout) do
+      @pool = ConnectionPool.new(
+        size: config.pool_size,
+        timeout: config.pool_timeout,
+        auto_reload_after_fork: true
+      ) do
         Slot.new(config, compression_code)
       end
     end
@@ -296,11 +282,14 @@ module ChConnect
       params = format_params(options[:params])
       settings = format_settings(options[:settings])
       retries = 0
+      reap_idle_connections
 
       response = begin
         @pool.with do |slot|
           columns, types, rows, summary = slot.query(sql, params, settings)
           Response.new(columns: columns, types: types, rows: rows, summary: summary)
+        ensure
+          @pool.discard_current_connection(&:close) if slot.broken?
         end
       rescue EstablishmentError
         raise if retries >= @config.max_retries
@@ -311,6 +300,11 @@ module ChConnect
       end
       response.summary[:client_elapsed_ns] = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1_000_000_000).to_i.to_s
       response
+    end
+
+    def reap_idle_connections
+      timeout = @config.keep_alive_timeout
+      @pool.reap(idle_seconds: timeout, &:close) if timeout
     end
 
     def validate_compression!

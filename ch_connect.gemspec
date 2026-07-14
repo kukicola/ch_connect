@@ -28,5 +28,5 @@ Gem::Specification.new do |spec|
   spec.extensions = ["ext/ch_connect_native/extconf.rb"]
 
   spec.add_dependency "bigdecimal", "~> 3.1"
-  spec.add_dependency "connection_pool", "~> 2.4"
+  spec.add_dependency "connection_pool", "~> 3.0"
 end
