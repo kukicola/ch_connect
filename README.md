@@ -139,14 +139,12 @@ currently expose the HTTP transport's former server-side `elapsed_ns` metric.
 ```ruby
 response = conn.query(
   "SELECT * FROM users WHERE id = {id:UInt64}",
-  params: {param_id: 123}
+  params: {id: 123}
 )
 ```
 
 `nil` is encoded as the native nullable marker.
-Parameter keys must use the `param_` prefix. Options such as
-`max_execution_time` that older HTTP releases accepted through `params:` must
-move to `settings:`; the database is configured on the connection.
+Parameter keys match the names used in query placeholders.
 
 ### Query settings
 

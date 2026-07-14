@@ -258,7 +258,7 @@ module ChConnect
     #
     # @param sql [String] SQL query to execute
     # @param options [Hash] query options
-    # @option options [Hash] :params query parameters (param_name => value)
+    # @option options [Hash] :params query parameters (name => value)
     # @option options [Hash] :settings per-query ClickHouse settings
     # @return [Response] fully parsed response
     # @raise [QueryError] if the query fails
@@ -320,23 +320,14 @@ module ChConnect
       code
     end
 
-    # Converts params into native protocol substitutions. The public API uses
-    # param_<name> keys, so the prefix is stripped here to recover the bare
-    # substitution name. Values go through
+    # Converts params into native protocol substitutions. Values go through
     # Field::restoreFromDump on the server, so everything is sent as a quoted
     # string and converted by the placeholder type (same convention as
     # clickhouse-cpp).
     def format_params(params)
       return nil if params.nil? || params.empty?
 
-      params.map do |key, value|
-        name = key.to_s
-        unless name.start_with?("param_")
-          raise ArgumentError, "query parameter #{name.inspect} must use the param_ prefix; pass ClickHouse settings via settings:"
-        end
-
-        [name.delete_prefix("param_"), quote_param(value)]
-      end
+      params.map { |name, value| [name.to_s, quote_param(value)] }
     end
 
     def quote_param(value)

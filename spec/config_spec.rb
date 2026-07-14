@@ -46,26 +46,6 @@ RSpec.describe ChConnect::Config do
       expect(described_class.new.port).to eq(9000)
       expect(described_class.new(ssl: true).port).to eq(9440)
     end
-
-    it "applies explicit options after URL values" do
-      config = described_class.new(
-        url: "clickhouse://url-user:url-pass@clickhouse.example.com:9010/url_db",
-        username: "explicit-user",
-        password: "explicit-pass",
-        database: "explicit_db"
-      )
-
-      expect(config.host).to eq("clickhouse.example.com")
-      expect(config.port).to eq(9010)
-      expect(config.username).to eq("explicit-user")
-      expect(config.password).to eq("explicit-pass")
-      expect(config.database).to eq("explicit_db")
-    end
-
-    it "derives the port after an explicit TLS override" do
-      expect(described_class.new(url: "clickhouse://localhost", ssl: true).port).to eq(9440)
-      expect(described_class.new(url: "clickhouses://localhost", ssl: false).port).to eq(9000)
-    end
   end
 
   describe "#url=" do

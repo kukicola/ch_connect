@@ -51,8 +51,8 @@ RSpec.describe ChConnect::Connection do
     it "survives compacting GC while serializing query parameters" do
       skip "GC compaction is unavailable" unless GC.respond_to?(:auto_compact=)
 
-      params = 16.times.to_h { |i| ["param_unused_#{i}", "value-#{i}"] }
-      params[:param_target] = "safe"
+      params = 16.times.to_h { |i| ["unused_#{i}", "value-#{i}"] }
+      params[:target] = "safe"
       previous_stress = GC.stress
       previous_auto_compact = GC.auto_compact
       GC.auto_compact = true
@@ -67,8 +67,8 @@ RSpec.describe ChConnect::Connection do
 
     it "serializes large parameter maps without exhausting a Ruby thread stack" do
       worker = Thread.new do
-        params = 40_000.times.to_h { |i| ["param_unused_#{i}", i] }
-        params["param_target"] = "safe"
+        params = 40_000.times.to_h { |i| ["unused_#{i}", i] }
+        params["target"] = "safe"
         connection.query("SELECT {target:String} AS target", params: params)
       end
 
@@ -454,39 +454,32 @@ RSpec.describe ChConnect::Connection do
   end
 
   describe "parameter formatting" do
-    it "quotes string values and strips the param_ prefix" do
-      expect(connection.send(:format_params, {param_name: "al'ice"})).to eq([["name", "'al\\\\\\'ice'"]])
+    it "quotes string values" do
+      expect(connection.send(:format_params, {name: "al'ice"})).to eq([["name", "'al\\\\\\'ice'"]])
     end
 
     it "quotes numeric values as strings" do
-      expect(connection.send(:format_params, {param_id: 42})).to eq([["id", "'42'"]])
+      expect(connection.send(:format_params, {id: 42})).to eq([["id", "'42'"]])
     end
 
     it "converts nil to the native nullable dump marker" do
-      expect(connection.send(:format_params, {param_x: nil})).to eq([["x", "'\\\\N'"]])
+      expect(connection.send(:format_params, {x: nil})).to eq([["x", "'\\\\N'"]])
     end
 
     it "escapes binary and control bytes for Field dump strings" do
       value = "nul:\0 bell:\a back:\b esc:\e form:\f line:\n return:\r tab:\t vert:\v quote:' slash:\\"
       response = connection.query(
         "SELECT {value:String} AS value",
-        params: {param_value: value}
+        params: {value: value}
       )
 
       expect(response.rows).to eq([[value]])
-      expect(connection.send(:format_params, {param_value: "a\0b"}).dig(0, 1)).to eq("'a\\\\0b'")
+      expect(connection.send(:format_params, {value: "a\0b"}).dig(0, 1)).to eq("'a\\\\0b'")
     end
 
     it "returns nil for empty params" do
       expect(connection.send(:format_params, nil)).to be_nil
       expect(connection.send(:format_params, {})).to be_nil
-    end
-
-    it "rejects former HTTP query options instead of silently ignoring them" do
-      expect { connection.query("SELECT 1", params: {max_execution_time: 1}) }
-        .to raise_error(ArgumentError, /pass ClickHouse settings via settings:/)
-      expect { connection.query("SELECT 1", params: {database: "analytics"}) }
-        .to raise_error(ArgumentError, /param_ prefix/)
     end
 
     it "protects native decoder settings" do

@@ -454,7 +454,7 @@ RSpec.describe ChConnect do
       it "passes parameters to query" do
         response = connection.query(
           "SELECT {id:UInt32} as id, {name:String} as name",
-          params: {param_id: 42, param_name: "alice"}
+          params: {id: 42, name: "alice"}
         )
 
         expect(response.rows).to eq([[42, "alice"]])
@@ -463,7 +463,7 @@ RSpec.describe ChConnect do
       it "passes typed parameters (integers, arrays, dates, floats)" do
         response = connection.query(
           "SELECT {id:UInt64} AS id, {ids:Array(UInt32)} AS ids, {d:Date} AS d, {f:Float64} AS f",
-          params: {param_id: 123, param_ids: "[1,2,3]", param_d: "2024-01-01", param_f: 1.5}
+          params: {id: 123, ids: "[1,2,3]", d: "2024-01-01", f: 1.5}
         )
 
         expect(response.rows).to eq([[123, [1, 2, 3], Date.new(2024, 1, 1), 1.5]])
@@ -483,7 +483,7 @@ RSpec.describe ChConnect do
       it "combines settings with parameters" do
         response = connection.query(
           "SELECT {id:UInt32} AS id",
-          params: {param_id: 7},
+          params: {id: 7},
           settings: {max_threads: 1}
         )
 
@@ -493,7 +493,7 @@ RSpec.describe ChConnect do
       it "passes nil as SQL NULL" do
         response = connection.query(
           "SELECT {value:Nullable(String)} AS value",
-          params: {param_value: nil}
+          params: {value: nil}
         )
 
         expect(response.rows).to eq([[nil]])

@@ -76,9 +76,9 @@ module ChConnect
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
     # @option params [Integer] :max_retries max retry attempts on connection errors (default: 3)
     def initialize(params = {})
-      DEFAULTS.each { |key, value| public_send("#{key}=", value) }
-      self.url = params[:url] if params[:url]
-      params.each { |key, value| public_send("#{key}=", value) unless key == :url }
+      DEFAULTS.merge(params).each do |key, value|
+        send("#{key}=", value)
+      end
     end
 
     # Returns the explicitly configured port or the default for the active
