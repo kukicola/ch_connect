@@ -40,7 +40,7 @@ module ChConnect
   # @yield [Config] the configuration instance
   # @return [void]
   def self.configure
-    yield(config) if block_given?
+    yield config
   end
 end
 
@@ -49,5 +49,6 @@ begin
 rescue LoadError => e
   raise ChConnect::Error, "ch_connect requires the compiled native extension: #{e.message}"
 end
+ChConnect.private_constant :NativeClient
 
 require_relative "ch_connect/connection"

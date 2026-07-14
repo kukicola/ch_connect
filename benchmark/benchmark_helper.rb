@@ -47,7 +47,7 @@ module BenchmarkHelper
   end
 
   # Run memory profiler for each adapter
-  def self.run_memory(title, adapters:, top: 10)
+  def self.run_memory(title, adapters:)
     puts "\n" + "=" * 60
     puts "Memory: #{title}"
     puts "=" * 60

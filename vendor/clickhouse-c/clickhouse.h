@@ -315,9 +315,11 @@ typedef struct chc_block_opts {
     size_t read_buffer_bytes;
 } chc_block_opts;
 
-/* Read one block. On clean EOF at a block boundary (no bytes consumed),
- * returns 0 with *out = NULL. On error returns CHC_ERR_* and fills err. */
-CHC_NODISCARD int  chc_block_read(chc_io *io, const chc_alloc *al,
+/* Read one block from a caller-owned chc_in. Reuse one chc_in (chc_in_init /
+ * chc_in_free) across calls to stream successive blocks: bytes read past the
+ * block boundary stay buffered for the next call. NULL opts means empty opts.
+ * Return 0 with *out = NULL at clean EOF, or CHC_ERR_* on error. */
+CHC_NODISCARD int  chc_block_read(chc_in *in, const chc_alloc *al,
                     const chc_block_opts *opts,
                     chc_block **out, chc_err *err);
 
@@ -780,31 +782,16 @@ chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
              size_t cap, chc_err *err)
 {
     if (cap == 0) cap = CHC_READ_BUFFER;
-    in->io = io;
-    in->al = al;
+    *in = (chc_in) { .io = io, .al = al, .cap = cap, .mark = SIZE_MAX };
     in->buf = chc__alloc(al, cap, err);
     if (!in->buf) return CHC_ERR_OOM;
-    in->cap = cap;
-    in->pos = 0;
-    in->fill = 0;
-    in->eof = false;
-    in->consumed = 0;
-    in->mark = SIZE_MAX;
     return CHC_OK;
 }
 
 int
 chc_in_init_ioless(chc_in *in, const chc_alloc *al)
 {
-    in->io = NULL;
-    in->al = al;
-    in->buf = NULL;             /* grown lazily on first feed */
-    in->cap = 0;
-    in->pos = 0;
-    in->fill = 0;
-    in->eof = false;
-    in->consumed = 0;
-    in->mark = SIZE_MAX;
+    *in = (chc_in) { .al = al, .mark = SIZE_MAX };
     return CHC_OK;
 }
 
@@ -855,14 +842,8 @@ chc_in_available(const chc_in *in)
 void
 chc_in_reset(chc_in *in)
 {
-    /* Drop consumed bytes [0, pos), keep [pos, fill). Clears any checkpoint;
-     * callers reset at packet boundaries, never mid-parse. */
     in->mark = SIZE_MAX;
-    if (in->pos == 0) return;
-    size_t live = in->fill - in->pos;
-    if (live) memmove(in->buf, in->buf + in->pos, live);
-    in->fill = live;
-    in->pos = 0;
+    chc__in_compact(in);
 }
 
 void
@@ -1009,24 +990,20 @@ chc__read_varuint(chc_in *in, uint64_t *out, chc_err *err)
 static int
 chc__read_u32_le(chc_in *in, uint32_t *out, chc_err *err)
 {
-    uint8_t b[4];
-    int rc = chc__read_bytes(in, b, 4, err);
+    uint32_t v;
+    int rc = chc__read_bytes(in, &v, sizeof v, err);
     if (rc != CHC_OK) return rc;
-    *out = (uint32_t) b[0] | ((uint32_t) b[1] << 8)
-         | ((uint32_t) b[2] << 16) | ((uint32_t) b[3] << 24);
+    *out = chc__bswap32(v);
     return CHC_OK;
 }
 
 static int
 chc__read_u64_le(chc_in *in, uint64_t *out, chc_err *err)
 {
-    uint8_t b[8];
-    int rc = chc__read_bytes(in, b, 8, err);
+    uint64_t v;
+    int rc = chc__read_bytes(in, &v, sizeof v, err);
     if (rc != CHC_OK) return rc;
-    *out = (uint64_t) b[0]        | ((uint64_t) b[1] << 8)
-         | ((uint64_t) b[2] << 16) | ((uint64_t) b[3] << 24)
-         | ((uint64_t) b[4] << 32) | ((uint64_t) b[5] << 40)
-         | ((uint64_t) b[6] << 48) | ((uint64_t) b[7] << 56);
+    *out = chc__bswap64(v);
     return CHC_OK;
 }
 
@@ -1154,13 +1131,14 @@ chc_type_tuple_field_name(const chc_type *t, size_t i, size_t *out_len)
 int
 chc_type_decimal_precision(const chc_type *t)
 {
-    if (!t) return 0;
+    if (!t || !chc__kind_is_decimal(t->kind)) return 0;
+    if (t->decimal.precision) return t->decimal.precision;
     switch (t->kind) {
     case CHC_DECIMAL32:  return 9;
     case CHC_DECIMAL64:  return 18;
     case CHC_DECIMAL128: return 38;
     case CHC_DECIMAL256: return 76;
-    default:             return t->decimal.precision;
+    default:             return 0;
     }
 }
 
@@ -1276,15 +1254,20 @@ chc__eat_tok(chc__lex *lx)
     return t;
 }
 
-static int64_t
-chc__atoi64(const char *s, size_t n)
+static bool
+chc__atoi64(const char *s, size_t n, int64_t *out)
 {
-    int64_t v = 0;
-    bool neg = false;
-    size_t i = 0;
-    if (n && s[0] == '-') { neg = true; i = 1; }
-    for (; i < n; i++) v = v * 10 + (s[i] - '0');
-    return neg ? -v : v;
+    bool neg = n && *s == '-';
+    if (neg) { s++; n--; }
+    if (!n) return false;
+    uint64_t v = 0, lim = (uint64_t) INT64_MAX + neg;
+    while (n--) {
+        uint64_t d = (uint64_t) (*s++ - '0');
+        if (v > (lim - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    *out = neg ? (v == lim ? INT64_MIN : -(int64_t) v) : (int64_t) v;
+    return true;
 }
 
 /* AUTO-GENERATED-NAME-TABLE-BEGIN -- regenerate via tools/regen_name_table.sh */
@@ -1292,262 +1275,69 @@ chc__atoi64(const char *s, size_t n)
 #define CHC__NAME_TABLE_SEED 720ull
 struct chc__name_row { const char *name; chc_kind kind; };
 static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
-    [  0] = {},
-    [  1] = {},
-    [  2] = {},
-    [  3] = {},
     [  4] = {"Int32", CHC_INT32},
-    [  5] = {},
-    [  6] = {},
-    [  7] = {},
     [  8] = {"Float32", CHC_FLOAT32},
-    [  9] = {},
-    [ 10] = {},
-    [ 11] = {},
-    [ 12] = {},
     [ 13] = {"MultiPolygon", CHC_MULTI_POLYGON},
-    [ 14] = {},
-    [ 15] = {},
-    [ 16] = {},
-    [ 17] = {},
-    [ 18] = {},
-    [ 19] = {},
     [ 20] = {"DateTime", CHC_DATETIME},
     [ 21] = {"Dynamic", CHC_DYNAMIC},
-    [ 22] = {},
-    [ 23] = {},
-    [ 24] = {},
-    [ 25] = {},
-    [ 26] = {},
-    [ 27] = {},
-    [ 28] = {},
-    [ 29] = {},
     [ 30] = {"IntervalMinute", CHC_INTERVAL},
-    [ 31] = {},
-    [ 32] = {},
     [ 33] = {"Ring", CHC_RING},
-    [ 34] = {},
-    [ 35] = {},
     [ 36] = {"IntervalMicrosecond", CHC_INTERVAL},
     [ 37] = {"Decimal64", CHC_DECIMAL64},
-    [ 38] = {},
-    [ 39] = {},
     [ 40] = {"DateTime64", CHC_DATETIME64},
-    [ 41] = {},
-    [ 42] = {},
     [ 43] = {"Int128", CHC_INT128},
     [ 44] = {"Tuple", CHC_TUPLE},
-    [ 45] = {},
-    [ 46] = {},
-    [ 47] = {},
     [ 48] = {"IntervalDay", CHC_INTERVAL},
     [ 49] = {"Map", CHC_MAP},
     [ 50] = {"IntervalSecond", CHC_INTERVAL},
-    [ 51] = {},
     [ 52] = {"UInt8", CHC_UINT8},
-    [ 53] = {},
-    [ 54] = {},
     [ 55] = {"Enum16", CHC_ENUM16},
-    [ 56] = {},
     [ 57] = {"IntervalMillisecond", CHC_INTERVAL},
-    [ 58] = {},
-    [ 59] = {},
     [ 60] = {"Int8", CHC_INT8},
-    [ 61] = {},
-    [ 62] = {},
-    [ 63] = {},
-    [ 64] = {},
     [ 65] = {"IntervalHour", CHC_INTERVAL},
-    [ 66] = {},
-    [ 67] = {},
     [ 68] = {"UInt256", CHC_UINT256},
-    [ 69] = {},
-    [ 70] = {},
-    [ 71] = {},
-    [ 72] = {},
     [ 73] = {"Date32", CHC_DATE32},
     [ 74] = {"BFloat16", CHC_BFLOAT16},
-    [ 75] = {},
-    [ 76] = {},
-    [ 77] = {},
-    [ 78] = {},
-    [ 79] = {},
-    [ 80] = {},
-    [ 81] = {},
-    [ 82] = {},
     [ 83] = {"Nullable", CHC_NULLABLE},
-    [ 84] = {},
-    [ 85] = {},
-    [ 86] = {},
-    [ 87] = {},
-    [ 88] = {},
     [ 89] = {"IntervalMonth", CHC_INTERVAL},
-    [ 90] = {},
-    [ 91] = {},
-    [ 92] = {},
-    [ 93] = {},
-    [ 94] = {},
-    [ 95] = {},
-    [ 96] = {},
-    [ 97] = {},
-    [ 98] = {},
-    [ 99] = {},
-    [100] = {},
     [101] = {"UInt128", CHC_UINT128},
-    [102] = {},
-    [103] = {},
-    [104] = {},
-    [105] = {},
     [106] = {"Enum8", CHC_ENUM8},
-    [107] = {},
-    [108] = {},
-    [109] = {},
-    [110] = {},
     [111] = {"Void", CHC_VOID},
-    [112] = {},
-    [113] = {},
-    [114] = {},
     [115] = {"IPv4", CHC_IPV4},
-    [116] = {},
-    [117] = {},
-    [118] = {},
-    [119] = {},
     [120] = {"Variant", CHC_VARIANT},
     [121] = {"LowCardinality", CHC_LOW_CARDINALITY},
     [122] = {"Time64", CHC_TIME64},
     [123] = {"Decimal128", CHC_DECIMAL128},
-    [124] = {},
-    [125] = {},
-    [126] = {},
-    [127] = {},
-    [128] = {},
-    [129] = {},
     [130] = {"UInt64", CHC_UINT64},
-    [131] = {},
     [132] = {"UInt32", CHC_UINT32},
     [133] = {"Int16", CHC_INT16},
     [134] = {"JSON", CHC_JSON},
     [135] = {"SimpleAggregateFunction", CHC_SIMPLE_AGGREGATE_FUNCTION},
     [136] = {"IntervalNanosecond", CHC_INTERVAL},
-    [137] = {},
-    [138] = {},
-    [139] = {},
     [140] = {"QBit", CHC_QBIT},
-    [141] = {},
-    [142] = {},
-    [143] = {},
-    [144] = {},
-    [145] = {},
-    [146] = {},
-    [147] = {},
-    [148] = {},
-    [149] = {},
     [150] = {"Nothing", CHC_NOTHING},
     [151] = {"Date", CHC_DATE},
-    [152] = {},
-    [153] = {},
-    [154] = {},
-    [155] = {},
-    [156] = {},
     [157] = {"IPv6", CHC_IPV6},
-    [158] = {},
-    [159] = {},
-    [160] = {},
-    [161] = {},
-    [162] = {},
-    [163] = {},
-    [164] = {},
-    [165] = {},
-    [166] = {},
-    [167] = {},
     [168] = {"Array", CHC_ARRAY},
-    [169] = {},
-    [170] = {},
-    [171] = {},
     [172] = {"Time", CHC_TIME},
-    [173] = {},
-    [174] = {},
-    [175] = {},
-    [176] = {},
     [177] = {"Object", CHC_OBJECT},
     [178] = {"Decimal32", CHC_DECIMAL32},
-    [179] = {},
-    [180] = {},
-    [181] = {},
-    [182] = {},
     [183] = {"Decimal256", CHC_DECIMAL256},
-    [184] = {},
-    [185] = {},
-    [186] = {},
-    [187] = {},
-    [188] = {},
     [189] = {"UUID", CHC_UUID},
-    [190] = {},
-    [191] = {},
-    [192] = {},
-    [193] = {},
-    [194] = {},
-    [195] = {},
-    [196] = {},
-    [197] = {},
-    [198] = {},
-    [199] = {},
-    [200] = {},
-    [201] = {},
-    [202] = {},
-    [203] = {},
-    [204] = {},
-    [205] = {},
     [206] = {"Nested", CHC_NESTED},
-    [207] = {},
-    [208] = {},
-    [209] = {},
-    [210] = {},
     [211] = {"Polygon", CHC_POLYGON},
-    [212] = {},
-    [213] = {},
     [214] = {"String", CHC_STRING},
-    [215] = {},
-    [216] = {},
-    [217] = {},
     [218] = {"AggregateFunction", CHC_AGGREGATE_FUNCTION},
     [219] = {"Int256", CHC_INT256},
-    [220] = {},
-    [221] = {},
-    [222] = {},
     [223] = {"UInt16", CHC_UINT16},
     [224] = {"IntervalQuarter", CHC_INTERVAL},
-    [225] = {},
-    [226] = {},
-    [227] = {},
-    [228] = {},
-    [229] = {},
-    [230] = {},
-    [231] = {},
     [232] = {"Bool", CHC_BOOL},
-    [233] = {},
-    [234] = {},
-    [235] = {},
     [236] = {"FixedString", CHC_FIXED_STRING},
     [237] = {"Int64", CHC_INT64},
-    [238] = {},
-    [239] = {},
-    [240] = {},
-    [241] = {},
-    [242] = {},
-    [243] = {},
-    [244] = {},
     [245] = {"IntervalYear", CHC_INTERVAL},
     [246] = {"Float64", CHC_FLOAT64},
-    [247] = {},
-    [248] = {},
-    [249] = {},
-    [250] = {},
-    [251] = {},
-    [252] = {},
     [253] = {"IntervalWeek", CHC_INTERVAL},
     [254] = {"Point", CHC_POINT},
-    [255] = {},
 };
 /* AUTO-GENERATED-NAME-TABLE-END */
 
@@ -1660,8 +1450,16 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                     chc_type_destroy(t, al);
                     return chc__err_set(err, CHC_ERR_TYPE, "Enum: expected value");
                 }
-                int rc = chc__type_push_enum(al, t, s.start, s.len,
-                                             chc__atoi64(num.start, num.len), err);
+                int64_t ev;
+                int64_t lo = t->kind == CHC_ENUM8 ? INT8_MIN : INT16_MIN;
+                int64_t hi = t->kind == CHC_ENUM8 ? INT8_MAX : INT16_MAX;
+                if (!chc__atoi64(num.start, num.len, &ev) || ev < lo || ev > hi) {
+                    chc_type_destroy(t, al);
+                    return chc__err_set(err, CHC_ERR_TYPE,
+                        "Enum: value out of range: %.*s",
+                        (int) num.len, num.start);
+                }
+                int rc = chc__type_push_enum(al, t, s.start, s.len, ev, err);
                 if (rc != CHC_OK) { chc_type_destroy(t, al); return rc; }
                 if (chc__peek_tok(lx).kind == CHC__TOK_COMMA) chc__eat_tok(lx);
             }
@@ -1671,11 +1469,13 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "FixedString: expected N");
             }
-            int64_t n = chc__atoi64(num.start, num.len);
-            if (n <= 0 || (uint64_t) n > CHC_MAX_FIXEDSTRING_SIZE) {
+            int64_t n;
+            if (!chc__atoi64(num.start, num.len, &n)
+                || n <= 0 || (uint64_t) n > CHC_MAX_FIXEDSTRING_SIZE) {
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE,
-                    "FixedString: N out of range: %lld", (long long) n);
+                    "FixedString: N out of range: %.*s",
+                    (int) num.len, num.start);
             }
             t->fixed_string.n = (int) n;
         } else if (decimal_alias) {
@@ -1694,9 +1494,17 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "Decimal: expected scale");
             }
-            int prec = (int) chc__atoi64(np.start, np.len);
-            t->decimal.precision = prec;
-            t->decimal.scale = (int) chc__atoi64(ns.start, ns.len);
+            int64_t prec, scale;
+            if (!chc__atoi64(np.start, np.len, &prec)
+                || !chc__atoi64(ns.start, ns.len, &scale)
+                || prec < 1 || prec > 76 || scale < 0 || scale > prec) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "Decimal: precision or scale out of range: %.*s, %.*s",
+                    (int) np.len, np.start, (int) ns.len, ns.start);
+            }
+            t->decimal.precision = (int) prec;
+            t->decimal.scale = (int) scale;
             if      (prec <=  9) t->kind = CHC_DECIMAL32;
             else if (prec <= 18) t->kind = CHC_DECIMAL64;
             else if (prec <= 38) t->kind = CHC_DECIMAL128;
@@ -1708,14 +1516,30 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "Decimal: expected scale");
             }
-            t->decimal.scale = (int) chc__atoi64(num.start, num.len);
+            int64_t scale;
+            if (!chc__atoi64(num.start, num.len, &scale)
+                || scale < 0 || scale > chc_type_decimal_precision(t)) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "Decimal: scale out of range: %.*s",
+                    (int) num.len, num.start);
+            }
+            t->decimal.scale = (int) scale;
         } else if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64) {
             chc__tok num = chc__eat_tok(lx);
             if (num.kind != CHC__TOK_NUMBER) {
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "DateTime64: expected precision");
             }
-            t->temporal.scale = (int) chc__atoi64(num.start, num.len);
+            int64_t scale;
+            if (!chc__atoi64(num.start, num.len, &scale)
+                || scale < 0 || scale > 9) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "DateTime64: precision out of range: %.*s",
+                    (int) num.len, num.start);
+            }
+            t->temporal.scale = (int) scale;
             if (chc__peek_tok(lx).kind == CHC__TOK_COMMA) {
                 chc__eat_tok(lx);
                 chc__tok s = chc__eat_tok(lx);
@@ -1771,12 +1595,14 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "QBit: expected dimension");
             }
-            int64_t n = chc__atoi64(num.start, num.len);
+            int64_t n;
             /* Nested FixedString width is ceil(N/8); bound it as FixedString is. */
-            if (n <= 0 || ((uint64_t) n + 7) / 8 > CHC_MAX_FIXEDSTRING_SIZE) {
+            if (!chc__atoi64(num.start, num.len, &n)
+                || n <= 0 || ((uint64_t) n + 7) / 8 > CHC_MAX_FIXEDSTRING_SIZE) {
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE,
-                    "QBit: dimension out of range: %lld", (long long) n);
+                    "QBit: dimension out of range: %.*s",
+                    (int) num.len, num.start);
             }
             t->qbit.dimension = (size_t) n;
         } else {
@@ -2312,10 +2138,14 @@ chc__col_read(chc_in *in, const chc_type *t,
         c->n_rows = n_rows;
         uint64_t total = 0;
         if (n_rows) {
-            c->array.offsets = chc__alloc(al, n_rows * sizeof(uint64_t), err);
+            size_t offs_bytes;
+            if (chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
+                chc__column_destroy(c, al);
+                return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
+            }
+            c->array.offsets = chc__alloc(al, offs_bytes, err);
             if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            int rc = chc__read_bytes(in, c->array.offsets,
-                                     n_rows * sizeof(uint64_t), err);
+            int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
             chc__swap_offsets(c->array.offsets, n_rows);
             total = c->array.offsets[n_rows - 1];
@@ -2505,9 +2335,14 @@ chc__col_read(chc_in *in, const chc_type *t,
                 "LowCardinality: key_rows %llu != block rows %zu",
                 (unsigned long long) key_rows, n_rows);
         }
-        c->lc.keys = chc__alloc(al, n_rows * c->lc.key_size, err);
+        size_t keys_bytes;
+        if (chc__mul_size(n_rows, c->lc.key_size, &keys_bytes)) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL, "LowCardinality keys size overflow");
+        }
+        c->lc.keys = chc__alloc(al, keys_bytes, err);
         if (!c->lc.keys) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        rc = chc__read_bytes(in, c->lc.keys, n_rows * c->lc.key_size, err);
+        rc = chc__read_bytes(in, c->lc.keys, keys_bytes, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         chc__swap_keys(c->lc.keys, n_rows, c->lc.key_size);
 
@@ -2586,10 +2421,14 @@ chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
     c->n_rows = n_rows;
     uint64_t total = 0;
     if (n_rows) {
-        c->array.offsets = chc__alloc(al, n_rows * sizeof(uint64_t), err);
+        size_t offs_bytes;
+        if (chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
+        }
+        c->array.offsets = chc__alloc(al, offs_bytes, err);
         if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        int rc = chc__read_bytes(in, c->array.offsets,
-                                 n_rows * sizeof(uint64_t), err);
+        int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         chc__swap_offsets(c->array.offsets, n_rows);
         total = c->array.offsets[n_rows - 1];
@@ -2832,20 +2671,22 @@ header_fail:
     return rc;
 }
 
-/* Block read using an already-initialised chc_in. Used by chc_block_read
- * (one-shot) and by clickhouse-client.h's recv_packet (persistent buffer).
- * Thin non-looping wrapper over chc__block_resume_in. Returns 0 with
- * *out == NULL on clean EOF at block boundary (only when opts->has_block_info
- * is false; TCP path has no clean-EOF concept). */
-static int
-chc__block_read_in(chc_in *in, const chc_alloc *al,
-                   const chc_block_opts *opts, chc_block **out, chc_err *err)
+/* Block read from an already-initialised chc_in. Also used by
+ * clickhouse-client.h's recv_packet (persistent buffer). Thin non-looping
+ * wrapper over chc__block_resume_in. Returns 0 with *out == NULL on clean EOF
+ * at block boundary (only when opts->has_block_info is false; TCP path has no
+ * clean-EOF concept). */
+int
+chc_block_read(chc_in *in, const chc_alloc *al,
+               const chc_block_opts *opts, chc_block **out, chc_err *err)
 {
+    chc_block_opts def = {};
+    if (!opts) opts = &def;
     /* Snapshot to roll back resume's per-column checkpoint progress: this
      * non-resuming entry is baseline (rewind to packet start), so a would-block
      * must leave `in` exactly as found. Callers that own the packet-start
-     * checkpoint/rewind (chc_block_read's io-backed in, the legacy ioless
-     * driver) then see untouched mark/pos/consumed. */
+     * checkpoint/rewind (io-backed in, the legacy ioless driver) then see
+     * untouched mark/pos/consumed. */
 #ifndef CHC_NO_ASYNC
     size_t   entry_pos = in->pos, entry_mark = in->mark;
     uint64_t entry_consumed = in->consumed;
@@ -2865,21 +2706,6 @@ chc__block_read_in(chc_in *in, const chc_alloc *al,
     }
 #endif
     *out = blk;
-    return rc;
-}
-
-int
-chc_block_read(chc_io *io, const chc_alloc *al,
-               const chc_block_opts *opts,
-               chc_block **out, chc_err *err)
-{
-    chc_block_opts def = {};
-    if (!opts) opts = &def;
-    chc_in in;
-    int rc = chc_in_init(&in, io, al, opts->read_buffer_bytes, err);
-    if (rc != CHC_OK) return rc;
-    rc = chc__block_read_in(&in, al, opts, out, err);
-    chc_in_free(&in);
     return rc;
 }
 
@@ -2977,6 +2803,24 @@ chc__bld_check_rows(chc_block_builder *bb, size_t n_rows, chc_err *err)
     return CHC_OK;
 }
 
+static int
+chc__bld_add(chc_block_builder *bb, const char *name, size_t name_len,
+             const chc_type *type, chc__bld_kind kind, size_t n_rows,
+             chc__col_entry **out, chc_err *err)
+{
+    int rc = chc__bld_check_rows(bb, n_rows, err);
+    if (rc != CHC_OK) return rc;
+    rc = chc__bld_grow(bb, err);
+    if (rc != CHC_OK) return rc;
+    chc__col_entry *e = &bb->cols[bb->n_cols++];
+    *e = (chc__col_entry) {
+        .name = name, .name_len = name_len, .type = type,
+        .kind = kind, .n_rows = n_rows,
+    };
+    *out = e;
+    return CHC_OK;
+}
+
 int
 chc_block_builder_append_fixed(chc_block_builder *bb,
                                const char *name, size_t name_len,
@@ -2987,16 +2831,10 @@ chc_block_builder_append_fixed(chc_block_builder *bb,
     size_t es = chc_type_elem_size(t);
     if (!es) return chc__err_set(err, CHC_ERR_TYPE,
         "append_fixed: type is not fixed-size");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_FIXED,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_FIXED;
-    e->n_rows = n_rows;
     e->fixed.data = data;
     e->fixed.elem_size = es;
     return CHC_OK;
@@ -3009,15 +2847,10 @@ chc_block_builder_append_string(chc_block_builder *bb,
                                 const uint8_t *data, size_t n_rows,
                                 chc_err *err)
 {
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, NULL, CHC__BLD_STRING,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->kind = CHC__BLD_STRING;
-    e->n_rows = n_rows;
     e->str.offsets = offsets;
     e->str.data = data;
     e->inner_n = n_rows;
@@ -3065,16 +2898,10 @@ chc_block_builder_append_nullable_fixed(chc_block_builder *bb,
     size_t es = chc__bld_inner_fixed_size(t, CHC_NULLABLE);
     if (!es) return chc__err_set(err, CHC_ERR_TYPE,
         "append_nullable_fixed: type is not Nullable(<fixed>)");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_NULL_FIXED,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_NULL_FIXED;
-    e->n_rows = n_rows;
     e->nullable.null_map = null_map;
     e->fixed.data = inner_data;
     e->fixed.elem_size = es;
@@ -3093,16 +2920,10 @@ chc_block_builder_append_nullable_string(chc_block_builder *bb,
     if (!chc__bld_inner_is_string(t, CHC_NULLABLE))
         return chc__err_set(err, CHC_ERR_TYPE,
             "append_nullable_string: type is not Nullable(String)");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_NULL_STRING,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_NULL_STRING;
-    e->n_rows = n_rows;
     e->nullable.null_map = null_map;
     e->str.offsets = inner_offsets;
     e->str.data = inner_data;
@@ -3121,16 +2942,10 @@ chc_block_builder_append_array_fixed(chc_block_builder *bb,
     size_t es = chc__bld_inner_fixed_size(t, CHC_ARRAY);
     if (!es) return chc__err_set(err, CHC_ERR_TYPE,
         "append_array_fixed: type is not Array(<fixed>)");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_ARRAY_FIXED,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_ARRAY_FIXED;
-    e->n_rows = n_rows;
     e->array.offsets = offsets;
     e->fixed.data = values;
     e->fixed.elem_size = es;
@@ -3150,16 +2965,10 @@ chc_block_builder_append_array_string(chc_block_builder *bb,
     if (!chc__bld_inner_is_string(t, CHC_ARRAY))
         return chc__err_set(err, CHC_ERR_TYPE,
             "append_array_string: type is not Array(String)");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_ARRAY_STRING,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_ARRAY_STRING;
-    e->n_rows = n_rows;
     e->array.offsets = offsets;
     e->str.offsets = values_offsets;
     e->str.data = values_data;
@@ -3203,16 +3012,10 @@ chc_block_builder_append_array_nested_fixed(chc_block_builder *bb,
     if (n_rows != level_offsets_len[0])
         return chc__err_set(err, CHC_ERR_USAGE,
             "append_array_nested_fixed: n_rows != level_offsets_len[0]");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t,
+                          CHC__BLD_ARRAY_NESTED_FIXED, n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_ARRAY_NESTED_FIXED;
-    e->n_rows = n_rows;
     e->nested.ndim = ndim;
     e->nested.level_offsets = level_offsets;
     e->nested.level_offsets_len = level_offsets_len;
@@ -3247,16 +3050,10 @@ chc_block_builder_append_array_nested_string(chc_block_builder *bb,
     if (n_rows != level_offsets_len[0])
         return chc__err_set(err, CHC_ERR_USAGE,
             "append_array_nested_string: n_rows != level_offsets_len[0]");
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t,
+                          CHC__BLD_ARRAY_NESTED_STRING, n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_ARRAY_NESTED_STRING;
-    e->n_rows = n_rows;
     e->nested.ndim = ndim;
     e->nested.level_offsets = level_offsets;
     e->nested.level_offsets_len = level_offsets_len;
@@ -3281,16 +3078,10 @@ chc_block_builder_append_json_string(chc_block_builder *bb,
         return chc__err_set(err, CHC_ERR_TYPE,
             "append_json_string requires CHC_JSON type, got %d",
             (int) (t ? t->kind : 0));
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_JSON_STRING,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_JSON_STRING;
-    e->n_rows = n_rows;
     e->str.offsets = offsets;
     e->str.data = data;
     e->inner_n = n_rows;
@@ -3314,16 +3105,10 @@ chc_block_builder_append_low_cardinality_string(chc_block_builder *bb,
     if (key_size != 1 && key_size != 2 && key_size != 4 && key_size != 8)
         return chc__err_set(err, CHC_ERR_USAGE,
             "append_low_cardinality_string: key_size must be 1/2/4/8 (got %d)", key_size);
-    int rc = chc__bld_check_rows(bb, n_rows, err);
+    chc__col_entry *e;
+    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_LC_STRING,
+                          n_rows, &e, err);
     if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    memset(e, 0, sizeof *e);
-    e->name = name; e->name_len = name_len;
-    e->type = t;
-    e->kind = CHC__BLD_LC_STRING;
-    e->n_rows = n_rows;
     e->lc.key_size = key_size;
     e->lc.keys = keys;
     e->str.offsets = dict_offsets;
@@ -3357,17 +3142,27 @@ chc__write_varuint(chc_io *io, uint64_t v, chc_err *err)
 static int
 chc__write_u32_le(chc_io *io, uint32_t v, chc_err *err)
 {
-    uint8_t b[4] = { (uint8_t) v, (uint8_t) (v >> 8),
-                     (uint8_t) (v >> 16), (uint8_t) (v >> 24) };
-    return chc__write_bytes(io, b, 4, err);
+    v = chc__bswap32(v);
+    return chc__write_bytes(io, &v, sizeof v, err);
 }
 
 static int
 chc__write_u64_le(chc_io *io, uint64_t v, chc_err *err)
 {
-    uint8_t b[8];
-    for (int i = 0; i < 8; i++) b[i] = (uint8_t) (v >> (8 * i));
-    return chc__write_bytes(io, b, 8, err);
+    v = chc__bswap64(v);
+    return chc__write_bytes(io, &v, sizeof v, err);
+}
+
+static int
+chc__write_block_info(chc_io *io, chc_err *err)
+{
+    int rc;
+    uint8_t overflows = 0;
+    if ((rc = chc__write_varuint(io, 1, err))) return rc;
+    if ((rc = chc__write_bytes(io, &overflows, 1, err))) return rc;
+    if ((rc = chc__write_varuint(io, 2, err))) return rc;
+    if ((rc = chc__write_u32_le(io, (uint32_t) -1, err))) return rc;
+    return chc__write_varuint(io, 0, err);
 }
 
 static int
@@ -3542,13 +3337,8 @@ chc_block_write(chc_io *io, const chc_block_builder *bb,
     if (!opts) opts = &def;
 
     if (opts->has_block_info) {
-        int rc;
-        if ((rc = chc__write_varuint(io, 1, err)) != CHC_OK) return rc;
-        uint8_t ov = 0;
-        if ((rc = chc__write_bytes(io, &ov, 1, err)) != CHC_OK) return rc;
-        if ((rc = chc__write_varuint(io, 2, err)) != CHC_OK) return rc;
-        if ((rc = chc__write_u32_le(io, (uint32_t) -1, err)) != CHC_OK) return rc;
-        if ((rc = chc__write_varuint(io, 0, err)) != CHC_OK) return rc;
+        int rc = chc__write_block_info(io, err);
+        if (rc != CHC_OK) return rc;
     }
 
     size_t n_rows = bb->n_rows_set ? bb->n_rows : 0;
@@ -3583,13 +3373,9 @@ chc_block_write(chc_io *io, const chc_block_builder *bb,
 
         if (e->n_rows == 0) continue;
 
-        /* Per-column prefix sub-stream. LC emits a key-version u64;
-         * JSON emits the SerializationObject version u64 (=1, STRING). */
-        if (e->kind == CHC__BLD_LC_STRING) {
-            rc = chc__write_u64_le(io, 1u, err);    /* KeysSerializationVersion */
-            if (rc != CHC_OK) return rc;
-        } else if (e->kind == CHC__BLD_JSON_STRING) {
-            rc = chc__write_u64_le(io, 1u, err);    /* SerializationObject::STRING */
+        /* LC and JSON prefixes use version 1. */
+        if (e->kind == CHC__BLD_LC_STRING || e->kind == CHC__BLD_JSON_STRING) {
+            rc = chc__write_u64_le(io, 1, err);
             if (rc != CHC_OK) return rc;
         }
 

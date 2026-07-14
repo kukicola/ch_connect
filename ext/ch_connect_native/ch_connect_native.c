@@ -53,6 +53,8 @@ static VALUE sym_result_rows;
 static VALUE sym_result_bytes;
 static VALUE sym_done;
 static VALUE sym_want_read;
+static VALUE sym_lz4;
+static VALUE sym_zstd;
 
 /* Julian day number of 1970-01-01 (Date.jd(2440588) == Date.new(1970, 1, 1)) */
 #define UNIX_EPOCH_JD 2440588
@@ -570,18 +572,24 @@ native_client_initialize(VALUE self, VALUE database, VALUE username, VALUE passw
     native_client_t *nc = get_client(self);
 
     Check_Type(database, T_STRING);
-    Check_Type(username, T_STRING);
-    Check_Type(password, T_STRING);
+    if (!NIL_P(username)) Check_Type(username, T_STRING);
+    if (!NIL_P(password)) Check_Type(password, T_STRING);
+
+    chc_compression compression_code;
+    if (NIL_P(compression)) compression_code = CHC_COMP_NONE;
+    else if (compression == sym_lz4) compression_code = CHC_COMP_LZ4;
+    else if (compression == sym_zstd) compression_code = CHC_COMP_ZSTD;
+    else rb_raise(rb_eArgError, "unknown native compression");
 
     nc->alloc = chc_alloc_stdlib();
     /* init copies the strings and performs no I/O */
     chc_client_opts opts = {
         .client_name = "ch_connect",
         .database = StringValueCStr(database),
-        .user = StringValueCStr(username),
-        .password = StringValueCStr(password),
+        .user = NIL_P(username) ? NULL : StringValueCStr(username),
+        .password = NIL_P(password) ? NULL : StringValueCStr(password),
         .codec = &g_codec,
-        .compression = (chc_compression)NUM2INT(compression),
+        .compression = compression_code,
     };
 
     chc_err err = {0};
@@ -638,7 +646,6 @@ native_client_handshake_step(VALUE self)
     if (rc == CHC_WOULD_BLOCK) return sym_want_read;
 
     nc->state = NATIVE_BROKEN;
-    if (err.server_code) rb_raise(eQueryError, "%s", err.msg);
     rb_raise(eConnectionError, "%s", err.msg);
 }
 
@@ -676,9 +683,11 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
     nc->read_rows = nc->read_bytes = nc->total_rows = 0;
     nc->written_rows = nc->written_bytes = 0;
     nc->result_bytes = 0;
-    rb_iv_set(self, "@columns", rb_ary_new());
-    rb_iv_set(self, "@types", rb_ary_new());
-    rb_iv_set(self, "@rows", rb_ary_new());
+    VALUE result = rb_ary_new_capa(3);
+    rb_ary_push(result, rb_ary_new());
+    rb_ary_push(result, rb_ary_new());
+    rb_ary_push(result, rb_ary_new());
+    rb_iv_set(self, "@result", result);
 
     if (!NIL_P(settings)) Check_Type(settings, T_ARRAY);
     long n_settings = NIL_P(settings) ? 0 : RARRAY_LEN(settings);
@@ -752,6 +761,12 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
 {
     size_t n_rows = chc_block_n_rows(block);
     size_t n_cols = chc_block_n_columns(block);
+    VALUE result = rb_iv_get(self, "@result");
+    if (NIL_P(result)) {
+        clear_pending(nc);
+        nc->state = NATIVE_BROKEN;
+        rb_raise(eConnectionError, "received native data without an active result");
+    }
 
     for (size_t i = 0; i < n_cols; i++) {
         chc_err err = {0};
@@ -766,8 +781,8 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
 
     if (!nc->have_header && n_cols > 0) {
         nc->have_header = 1;
-        VALUE columns = rb_iv_get(self, "@columns");
-        VALUE types = rb_iv_get(self, "@types");
+        VALUE columns = RARRAY_AREF(result, 0);
+        VALUE types = RARRAY_AREF(result, 1);
         for (size_t i = 0; i < n_cols; i++) {
             size_t len = 0;
             const char *name = chc_block_column_name(block, i, &len);
@@ -781,7 +796,7 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
         }
     }
 
-    VALUE rows = rb_iv_get(self, "@rows");
+    VALUE rows = RARRAY_AREF(result, 2);
     /* Decode all columns of this block, then append transposed rows. col_vals
      * anchors the decoded arrays for GC; cols makes the transpose O(1). */
     VALUE col_vals = rb_ary_new_capa((long)n_cols);
@@ -834,9 +849,7 @@ native_client_recv_step(VALUE self)
             VALUE msg = rb_utf8_str_new(pkt.exception->display_text,
                                         (long)pkt.exception->display_text_len);
             clear_pending(nc);
-            rb_iv_set(self, "@columns", Qnil);
-            rb_iv_set(self, "@types", Qnil);
-            rb_iv_set(self, "@rows", Qnil);
+            rb_iv_set(self, "@result", Qnil);
             /* A complete server exception terminates this query but leaves the
              * native protocol synchronized and ready for the next query. */
             nc->state = NATIVE_READY;
@@ -876,27 +889,24 @@ native_client_take_result(VALUE self)
 {
     native_client_t *nc = get_client(self);
 
-    VALUE rows = rb_iv_get(self, "@rows");
-    if (NIL_P(rows))
+    VALUE result = rb_iv_get(self, "@result");
+    if (NIL_P(result))
         rb_raise(eConnectionError, "no completed native result is available");
+    VALUE rows = RARRAY_AREF(result, 2);
 
     VALUE summary = rb_hash_new();
-    rb_hash_aset(summary, sym_read_rows, rb_obj_as_string(ULL2NUM(nc->read_rows)));
-    rb_hash_aset(summary, sym_read_bytes, rb_obj_as_string(ULL2NUM(nc->read_bytes)));
-    rb_hash_aset(summary, sym_written_rows, rb_obj_as_string(ULL2NUM(nc->written_rows)));
-    rb_hash_aset(summary, sym_written_bytes, rb_obj_as_string(ULL2NUM(nc->written_bytes)));
-    rb_hash_aset(summary, sym_total_rows_to_read, rb_obj_as_string(ULL2NUM(nc->total_rows)));
-    rb_hash_aset(summary, sym_result_rows,
-                 rb_obj_as_string(ULL2NUM((uint64_t)RARRAY_LEN(rows))));
-    rb_hash_aset(summary, sym_result_bytes, rb_obj_as_string(ULL2NUM(nc->result_bytes)));
+    rb_hash_aset(summary, sym_read_rows, ULL2NUM(nc->read_rows));
+    rb_hash_aset(summary, sym_read_bytes, ULL2NUM(nc->read_bytes));
+    rb_hash_aset(summary, sym_written_rows, ULL2NUM(nc->written_rows));
+    rb_hash_aset(summary, sym_written_bytes, ULL2NUM(nc->written_bytes));
+    rb_hash_aset(summary, sym_total_rows_to_read, ULL2NUM(nc->total_rows));
+    rb_hash_aset(summary, sym_result_rows, LONG2NUM(RARRAY_LEN(rows)));
+    rb_hash_aset(summary, sym_result_bytes, ULL2NUM(nc->result_bytes));
 
-    VALUE result = rb_ary_new_from_args(4, rb_iv_get(self, "@columns"), rb_iv_get(self, "@types"),
-                                        rows, summary);
+    rb_ary_push(result, summary);
     /* drop the references so a pooled idle connection doesn't pin the last
      * result set until its next query */
-    rb_iv_set(self, "@columns", Qnil);
-    rb_iv_set(self, "@types", Qnil);
-    rb_iv_set(self, "@rows", Qnil);
+    rb_iv_set(self, "@result", Qnil);
     return result;
 }
 
@@ -972,6 +982,8 @@ Init_ch_connect_native(void)
     sym_result_bytes = ID2SYM(rb_intern("result_bytes"));
     sym_done = ID2SYM(rb_intern("done"));
     sym_want_read = ID2SYM(rb_intern("want_read"));
+    sym_lz4 = ID2SYM(rb_intern("lz4"));
+    sym_zstd = ID2SYM(rb_intern("zstd"));
 
     memset(&g_codec, 0, sizeof(g_codec));
 #ifdef CHC_EXT_HAVE_LZ4

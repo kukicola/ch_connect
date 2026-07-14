@@ -112,6 +112,9 @@ end
 threads.each(&:join)
 ```
 
+Configuration is copied when a `Connection` is created. Create a new connection
+to apply configuration changes.
+
 ### Results
 
 `Response` implements `Enumerable`:
@@ -127,7 +130,7 @@ response.rows      # [[1, "Alice", 2024-01-01 00:00:00 UTC], ...]
 response.columns   # [:id, :name, :created_at]
 response.types     # [:UInt64, :String, :DateTime]
 response.to_a      # [{id: 1, name: "Alice", ...}, ...]
-response.summary   # {read_rows: "1", read_bytes: "42", ...}
+response.summary   # {read_rows: 1, read_bytes: 42, ...}
 ```
 
 `summary[:client_elapsed_ns]` is client wall-clock time for the complete query,
@@ -195,7 +198,7 @@ Unsupported types raise `ChConnect::UnsupportedTypeError` and discard the affect
 | `ssl_verify` | `true` | Verify the server certificate |
 | `ssl_ca` | `nil` | CA certificate file; system roots are used by default |
 | `database` | `"default"` | Database name |
-| `username` | `""` | Authentication username; empty becomes `default` |
+| `username` | `"default"` | Authentication username |
 | `password` | `""` | Authentication password |
 | `connection_timeout` | `5` | TCP and protocol handshake timeout in seconds |
 | `read_timeout` | `60` | Maximum time without response data |

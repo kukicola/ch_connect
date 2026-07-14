@@ -27,7 +27,7 @@ module ChConnect
       ssl_verify: true,
       ssl_ca: nil,
       database: "default",
-      username: "",
+      username: "default",
       password: "",
       connection_timeout: 5,
       read_timeout: 60,
@@ -66,7 +66,7 @@ module ChConnect
     # @option params [String] :host server hostname (default: "localhost")
     # @option params [Integer, nil] :port native endpoint port (default: 9000, or 9440 with TLS)
     # @option params [String] :database database name (default: "default")
-    # @option params [String] :username authentication username (default: "")
+    # @option params [String] :username authentication username (default: "default")
     # @option params [String] :password authentication password (default: "")
     # @option params [Integer] :connection_timeout connection timeout in seconds (default: 5)
     # @option params [Integer] :read_timeout read timeout in seconds (default: 60)

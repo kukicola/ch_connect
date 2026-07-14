@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 RSpec.describe ChConnect::Connection do
+  let(:native_client_class) { ChConnect.const_get(:NativeClient, false) }
+  let(:slot_class) { described_class.const_get(:Slot, false) }
   let(:config) do
     ChConnect.config.dup
   end
@@ -8,32 +10,43 @@ RSpec.describe ChConnect::Connection do
 
   after { @connection&.close }
 
+  describe "#initialize" do
+    it "captures an immutable configuration snapshot" do
+      original_database = config.database
+      created = connection
+
+      config.database = "changed_after_connection_creation"
+
+      expect(created.config.database).to eq(original_database)
+      expect(created.config).to be_frozen
+    end
+  end
+
   describe "#query" do
     it "recovers the pooled connection after a server error" do
       native_client = nil
-      allow(described_class::Slot).to receive(:new).and_call_original
-      allow(ChConnect::NativeClient).to receive(:new).and_wrap_original do |method, *args|
+      allow(slot_class).to receive(:new).and_call_original
+      allow(native_client_class).to receive(:new).and_wrap_original do |method, *args|
         native_client = method.call(*args)
       end
 
       expect { connection.query("SELECT bad_column FROM system.one") }
         .to raise_error(ChConnect::QueryError)
-      expect(native_client.instance_variables.to_h { |ivar| [ivar, native_client.instance_variable_get(ivar)] })
-        .to include(:@columns => nil, :@types => nil, :@rows => nil)
+      expect(native_client.instance_variable_get(:@result)).to be_nil
 
       expect(connection.query("SELECT 2 AS two").rows).to eq([[2]])
-      expect(ChConnect::NativeClient).to have_received(:new).once
-      expect(described_class::Slot).to have_received(:new).once
+      expect(native_client_class).to have_received(:new).once
+      expect(slot_class).to have_received(:new).once
     end
 
     it "rejects unsupported fixed types and recovers" do
-      allow(described_class::Slot).to receive(:new).and_call_original
+      allow(slot_class).to receive(:new).and_call_original
 
       expect { connection.query("SELECT toBFloat16(1)") }
         .to raise_error(ChConnect::UnsupportedTypeError, /BFloat16/)
 
       expect(connection.query("SELECT 42 AS answer").rows).to eq([[42]])
-      expect(described_class::Slot).to have_received(:new).twice
+      expect(slot_class).to have_received(:new).twice
     end
 
     it "rejects unsupported types in empty result sets" do
@@ -46,6 +59,19 @@ RSpec.describe ChConnect::Connection do
         .to raise_error(ChConnect::UnsupportedTypeError, /Nothing/)
       expect { connection.query("SELECT INTERVAL 1 DAY AS value") }
         .to raise_error(ChConnect::UnsupportedTypeError, /Interval/)
+    end
+
+    it "classifies handshake rejection as a connection error" do
+      rejected_config = config.dup.tap do |c|
+        c.password = "definitely-wrong"
+        c.max_retries = 0
+      end
+      rejected_connection = described_class.new(rejected_config)
+
+      expect { rejected_connection.query("SELECT 1") }
+        .to raise_error(ChConnect::ConnectionError)
+    ensure
+      rejected_connection&.close
     end
 
     it "survives compacting GC while serializing query parameters" do
@@ -137,7 +163,7 @@ RSpec.describe ChConnect::Connection do
       plain = rows_with(nil)
 
       expect(rows_with(:lz4)).to eq(plain)
-      expect(rows_with(:zstd)).to eq(plain) if ChConnect::NativeClient::ZSTD_AVAILABLE
+      expect(rows_with(:zstd)).to eq(plain) if native_client_class.const_get(:ZSTD_AVAILABLE, false)
     end
 
     it "keeps compression configuration authoritative" do
@@ -148,17 +174,27 @@ RSpec.describe ChConnect::Connection do
   end
 
   describe "summary" do
-    it "uses string values" do
-      client = ChConnect::NativeClient.new("default", "default", "", 0)
-      client.instance_variable_set(:@columns, [])
-      client.instance_variable_set(:@types, [])
-      client.instance_variable_set(:@rows, [])
+    it "uses integer values" do
+      client = native_client_class.new("default", "default", "", nil)
+      client.instance_variable_set(:@result, [[], [], []])
 
       summary = client.take_result.last
 
-      expect(summary.values).to all(be_a(String))
+      expect(summary.values).to all(be_a(Integer))
       expect { client.take_result }
         .to raise_error(ChConnect::ConnectionError, /no completed native result/)
+    ensure
+      client&.close
+    end
+  end
+
+  describe "native initialization" do
+    it "accepts nil credentials and rejects unknown compression" do
+      client = native_client_class.new("default", nil, nil, nil)
+
+      expect {
+        native_client_class.new("default", "default", "", :unknown)
+      }.to raise_error(ArgumentError, "unknown native compression")
     ensure
       client&.close
     end
@@ -171,18 +207,18 @@ RSpec.describe ChConnect::Connection do
         c.pool_size = 1
       end
       idle_connection = described_class.new(idle_config)
-      allow(described_class::Slot).to receive(:new).and_call_original
+      allow(slot_class).to receive(:new).and_call_original
 
       idle_connection.query("SELECT 1")
       idle_connection.query("SELECT 2")
 
-      expect(described_class::Slot).to have_received(:new).twice
+      expect(slot_class).to have_received(:new).twice
     ensure
       idle_connection&.close
     end
 
     it "writes all output through partial nonblocking writes" do
-      slot = described_class::Slot.allocate
+      slot = slot_class.allocate
       client = double("NativeClient")
       socket = double("Socket")
       config = double("Config", write_timeout: 5.0)
@@ -199,7 +235,7 @@ RSpec.describe ChConnect::Connection do
     end
 
     it "bounds native writes by write_timeout" do
-      slot = described_class::Slot.allocate
+      slot = slot_class.allocate
       client = double("NativeClient", take_output: "blocked")
       socket = double("Socket", write_nonblock: :wait_writable)
       config = double("Config", write_timeout: 5.0)
@@ -214,7 +250,7 @@ RSpec.describe ChConnect::Connection do
     end
 
     it "uses one connection timeout budget for the full native handshake" do
-      slot = described_class::Slot.allocate
+      slot = slot_class.allocate
       client = double("NativeClient", handshake_step: nil, feed: nil)
       config = double("Config", connection_timeout: 5.0)
 
@@ -233,7 +269,7 @@ RSpec.describe ChConnect::Connection do
     end
 
     it "stops the native handshake once its connection timeout is exhausted" do
-      slot = described_class::Slot.allocate
+      slot = slot_class.allocate
       client = double("NativeClient", handshake_step: :want_read)
       config = double("Config", connection_timeout: 5.0)
 

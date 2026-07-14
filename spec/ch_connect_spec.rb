@@ -13,10 +13,6 @@ RSpec.describe ChConnect do
         expect(config).to be_a(ChConnect::Config)
       end
     end
-
-    it "does nothing without a block" do
-      expect { described_class.configure }.not_to raise_error
-    end
   end
 
   describe "querying" do
@@ -418,7 +414,7 @@ RSpec.describe ChConnect do
         expect(response.summary).to have_key(:result_bytes)
         expect(response.summary).to have_key(:client_elapsed_ns)
         expect(response.summary).not_to have_key(:elapsed_ns)
-        expect(response.summary.values_at(:read_rows, :read_bytes)).to all(be_a(String))
+        expect(response.summary.values_at(:read_rows, :read_bytes)).to all(be_a(Integer))
       end
     end
 

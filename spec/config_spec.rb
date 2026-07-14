@@ -10,7 +10,7 @@ RSpec.describe ChConnect::Config do
       expect(config.ssl).to be(false)
       expect(config.compression).to eq(:lz4)
       expect(config.database).to eq("default")
-      expect(config.username).to eq("")
+      expect(config.username).to eq("default")
       expect(config.password).to eq("")
       expect(config.connection_timeout).to eq(5)
       expect(config.read_timeout).to eq(60)
@@ -86,24 +86,13 @@ RSpec.describe ChConnect::Config do
 
       expect(config.host).to eq("localhost")
       expect(config.database).to eq("default")
-      expect(config.username).to eq("")
+      expect(config.username).to eq("default")
       expect(config.password).to eq("")
     end
 
     it "rejects non-native schemes" do
       expect { described_class.new.url = "https://clickhouse.example.com/data" }
         .to raise_error(ArgumentError, /unsupported ClickHouse URL scheme/)
-    end
-  end
-
-  describe "attribute accessors" do
-    it "allows setting values after initialization" do
-      config = described_class.new
-      config.host = "new-host.example.com"
-      config.port = 9999
-
-      expect(config.host).to eq("new-host.example.com")
-      expect(config.port).to eq(9999)
     end
   end
 end

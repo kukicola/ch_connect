@@ -19,8 +19,11 @@ module ChConnect
     class EstablishmentError < ConnectionError; end
     private_constant :EstablishmentError
 
-    # Maps config.compression to the chc_compression enum in the extension.
-    COMPRESSION_CODES = {nil => 0, :lz4 => 1, :zstd => 2}.freeze
+    COMPRESSION_AVAILABLE = {
+      nil => true,
+      :lz4 => NativeClient::LZ4_AVAILABLE,
+      :zstd => NativeClient::ZSTD_AVAILABLE
+    }.freeze
 
     READ_CHUNK = 64 * 1024
     WRITE_CHUNK = 64 * 1024
@@ -41,9 +44,8 @@ module ChConnect
     # tracks both via broken?.
     # @api private
     class Slot
-      def initialize(config, compression_code)
+      def initialize(config)
         @config = config
-        @compression_code = compression_code
         @socket = nil
         @client = nil
         @pid = Process.pid
@@ -98,19 +100,14 @@ module ChConnect
         @socket = connect_socket
         @client = NativeClient.new(
           @config.database,
-          normalized_username,
-          @config.password || "",
-          @compression_code
+          @config.username,
+          @config.password,
+          @config.compression
         )
         handshake
       rescue ConnectionError, IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
         close
         raise EstablishmentError, "#{e.class}: #{e.message}"
-      end
-
-      def normalized_username
-        username = @config.username
-        (username.nil? || username.empty?) ? "default" : username
       end
 
       def connect_socket
@@ -174,27 +171,22 @@ module ChConnect
       def flush_output
         deadline = monotonic_now + @config.write_timeout if @config.write_timeout
         while (out = @client.take_output)
-          out_offset = 0
-          while out_offset < out.bytesize
-            chunk = out.byteslice(out_offset, [WRITE_CHUNK, out.bytesize - out_offset].min)
-            chunk_offset = 0
-            while chunk_offset < chunk.bytesize
-              if deadline && deadline - monotonic_now <= 0
-                raise ConnectionError, "write timeout"
-              end
-
-              pending = (chunk_offset == 0) ? chunk : chunk.byteslice(chunk_offset, chunk.bytesize - chunk_offset)
-              case (written = @socket.write_nonblock(pending, exception: false))
-              when :wait_readable, :wait_writable
-                remaining = deadline && (deadline - monotonic_now)
-                wait_or_fail(@socket, written, remaining, "write timeout")
-              else
-                raise ConnectionError, "connection closed while writing" if written == 0
-
-                chunk_offset += written
-              end
+          offset = 0
+          while offset < out.bytesize
+            if deadline && deadline - monotonic_now <= 0
+              raise ConnectionError, "write timeout"
             end
-            out_offset += chunk.bytesize
+
+            pending = out.byteslice(offset, [WRITE_CHUNK, out.bytesize - offset].min)
+            case (written = @socket.write_nonblock(pending, exception: false))
+            when :wait_readable, :wait_writable
+              remaining = deadline && (deadline - monotonic_now)
+              wait_or_fail(@socket, written, remaining, "write timeout")
+            else
+              raise ConnectionError, "connection closed while writing" if written == 0
+
+              offset += written
+            end
           end
         end
       end
@@ -234,6 +226,7 @@ module ChConnect
         nil
       end
     end
+    private_constant :Slot
 
     # @return [Config] the configuration used by this connection
     attr_reader :config
@@ -242,29 +235,28 @@ module ChConnect
     #
     # @param config [Config] configuration instance (defaults to global config)
     def initialize(config = ChConnect.config)
-      @config = config
-      compression_code = validate_compression!
-      @codec_name = (compression_code == 0) ? nil : config.compression.to_s
+      @config = config.dup.freeze
+      validate_compression!
+      @codec_name = @config.compression&.to_s
       @pool = ConnectionPool.new(
-        size: config.pool_size,
-        timeout: config.pool_timeout,
+        size: @config.pool_size,
+        timeout: @config.pool_timeout,
         auto_reload_after_fork: true
       ) do
-        Slot.new(config, compression_code)
+        Slot.new(@config)
       end
     end
 
     # Executes and instruments a SQL query.
     #
     # @param sql [String] SQL query to execute
-    # @param options [Hash] query options
-    # @option options [Hash] :params query parameters (name => value)
-    # @option options [Hash] :settings per-query ClickHouse settings
+    # @param params [Hash, nil] query parameters (name => value)
+    # @param settings [Hash, nil] per-query ClickHouse settings
     # @return [Response] fully parsed response
     # @raise [QueryError] if the query fails
-    def query(sql, options = {})
+    def query(sql, params: nil, settings: nil)
       @config.instrumenter.instrument("query.clickhouse", {sql: sql}) do
-        execute_query(sql, options)
+        execute_query(sql, params, settings)
       end
     end
 
@@ -277,17 +269,16 @@ module ChConnect
 
     private
 
-    def execute_query(sql, options)
-      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      params = format_params(options[:params])
-      settings = format_settings(options[:settings])
+    def execute_query(sql, user_params, user_settings)
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      params = format_params(user_params)
+      settings = format_settings(user_settings)
       retries = 0
       reap_idle_connections
 
-      response = begin
+      columns, types, rows, summary = begin
         @pool.with do |slot|
-          columns, types, rows, summary = slot.query(sql, params, settings)
-          Response.new(columns: columns, types: types, rows: rows, summary: summary)
+          slot.query(sql, params, settings)
         ensure
           @pool.discard_current_connection(&:close) if slot.broken?
         end
@@ -298,8 +289,8 @@ module ChConnect
       rescue ConnectionPool::TimeoutError => e
         raise ConnectionError, "could not obtain a TCP connection from the pool: #{e.message}"
       end
-      response.summary[:client_elapsed_ns] = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1_000_000_000).to_i.to_s
-      response
+      summary[:client_elapsed_ns] = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) - started_at
+      Response.new(columns: columns, types: types, rows: rows, summary: summary)
     end
 
     def reap_idle_connections
@@ -308,16 +299,13 @@ module ChConnect
     end
 
     def validate_compression!
-      code = COMPRESSION_CODES.fetch(@config.compression) do
+      available = COMPRESSION_AVAILABLE.fetch(@config.compression) do
         raise Error, "unknown compression: #{@config.compression.inspect} (use :lz4, :zstd or nil)"
       end
-      if @config.compression == :lz4 && !NativeClient::LZ4_AVAILABLE
-        raise Error, "compression = :lz4 but the extension was built without liblz4 (install lz4 and reinstall the gem, or set config.compression = nil)"
+      compression = @config.compression
+      unless available
+        raise Error, "compression = #{compression.inspect} but the extension was built without lib#{compression} (install #{compression} and reinstall the gem, or set config.compression = nil)"
       end
-      if @config.compression == :zstd && !NativeClient::ZSTD_AVAILABLE
-        raise Error, "compression = :zstd but the extension was built without libzstd (install zstd and reinstall the gem, or set config.compression = nil)"
-      end
-      code
     end
 
     # Converts params into native protocol substitutions. Values go through

@@ -11,8 +11,6 @@ require "uri"
 module Adapters
   # Adapter for ch_connect's native TCP protocol.
   class ChConnectAdapter
-    attr_reader :connection
-
     def initialize(config = {})
       ch_config = ChConnect::Config.new(
         host: config[:host] || "localhost",
@@ -22,7 +20,6 @@ module Adapters
       @connection = ChConnect::Connection.new(ch_config)
     end
 
-    def name = :ch_connect
     def execute(sql) = @connection.query(sql)
     def result_to_array(result) = result.to_a
     def result_row_count(result) = result.rows.size
@@ -38,7 +35,6 @@ module Adapters
       end
     end
 
-    def name = :click_house
     def execute(sql) = ClickHouse.connection.select_all(sql)
     def result_to_array(result) = result.to_a
     def result_row_count(result) = result.to_a.size
@@ -55,7 +51,6 @@ module Adapters
       )
     end
 
-    def name = :clickhouse
     def execute(sql) = Clickhouse.connection.query(sql)
     def result_to_array(result) = result.to_a
     def result_row_count(result) = result.to_a.size
@@ -101,7 +96,6 @@ module Adapters
       @config.logger = Logger.new(File::NULL)
     end
 
-    def name = :gitlab
     def execute(sql) = ClickHouse::Client.select(sql, :main, @config)
     def result_to_array(result) = result
     def result_row_count(result) = result.size
