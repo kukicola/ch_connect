@@ -8,6 +8,11 @@
 - New config options: `compression`, `ssl`, `ssl_verify`, `ssl_ca`
 - New dependency: `connection_pool` (~> 2.4)
 - Connection failures raise `ChConnect::ConnectionError`; `QueryError` remains for server-side query errors
+- Queries are retried only when connection establishment fails; failures after query transmission begins are returned without retrying to avoid duplicating non-idempotent statements
+- `summary[:client_elapsed_ns]` reports end-to-end client time; the old HTTP server metric `summary[:elapsed_ns]` is no longer available
+- `params:` now accepts only `param_`-prefixed native query parameters; move ClickHouse settings to `settings:` and configure the database on the connection
+- Removed HTTP configuration options `scheme` and `transport` (`transport: :native` remains an accepted no-op for migration); existing port 8123/8443 configurations must move to a native TCP port, normally 9000/9440
+- Restored `keep_alive_timeout` for recycling idle pooled native connections, with a TCP-appropriate default of 60 seconds
 
 ## [0.2.2] - 2026-05-06
 

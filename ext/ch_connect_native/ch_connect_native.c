@@ -281,14 +281,16 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
     }
     case CHC_DATETIME64: {
         int scale = chc_type_datetime64_scale(t);
-        int64_t mult = 1;
-        for (int s = 0; s < 9 - scale; s++) mult *= 10;
+        int64_t ticks_per_second = 1;
+        int64_t nanoseconds_per_tick = 1;
+        for (int s = 0; s < scale; s++) ticks_per_second *= 10;
+        for (int s = scale; s < 9; s++) nanoseconds_per_tick *= 10;
         for (long i = 0; i < n_rows; i++) {
             int64_t ticks = load_i64le(data + i * 8);
-            __int128 tns = (__int128)ticks * mult;
-            int64_t sec = (int64_t)(tns / 1000000000);
-            int64_t nsec = (int64_t)(tns % 1000000000);
-            if (nsec < 0) { nsec += 1000000000; sec -= 1; }
+            int64_t sec = ticks / ticks_per_second;
+            int64_t remainder = ticks % ticks_per_second;
+            if (remainder < 0) { remainder += ticks_per_second; sec -= 1; }
+            int64_t nsec = remainder * nanoseconds_per_tick;
             struct timespec tsp = { .tv_sec = (time_t)sec, .tv_nsec = (long)nsec };
             rb_ary_push(ary, rb_time_timespec_new(&tsp, INT_MAX - 1)); /* UTC */
         }
@@ -691,12 +693,17 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
     append_string_pairs(settings, n_settings, flat);
     append_string_pairs(params, n_params, flat);
 
-    chc_query_setting *csettings = ALLOCA_N(chc_query_setting, n_settings + 1);
+    /* These counts come from public hashes and can be large. ALLOCV_N uses a
+     * small stack buffer or Ruby's heap without risking the native stack. Both
+     * buffers are allocated before retaining any movable Ruby string pointer. */
+    VALUE csettings_buf = 0, cparams_buf = 0;
+    chc_query_setting *csettings = ALLOCV_N(chc_query_setting, csettings_buf,
+                                            n_settings + 1);
+    chc_query_param *cparams = n_params > 0
+        ? ALLOCV_N(chc_query_param, cparams_buf, n_params)
+        : NULL;
+
     long n_total = 0;
-    /* decoder invariant: the wire must carry printable type names */
-    csettings[n_total++] = (chc_query_setting){
-        .name = "output_format_native_encode_types_in_binary_format", .value = "0"
-    };
     for (long i = 0; i < n_settings; i++) {
         VALUE sname = RARRAY_AREF(flat, 2 * i);
         VALUE sval = RARRAY_AREF(flat, 2 * i + 1);
@@ -704,12 +711,15 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
             .name = RSTRING_PTR(sname), .value = RSTRING_PTR(sval)
         };
     }
+    /* Keep the decoder invariant last so a duplicate supplied through the
+     * low-level NativeClient API cannot override it. */
+    csettings[n_total++] = (chc_query_setting){
+        .name = "output_format_native_encode_types_in_binary_format", .value = "0"
+    };
 
     chc_query_opts qopts = { .settings = csettings, .n_settings = (size_t)n_total };
 
-    chc_query_param *cparams = NULL;
     if (n_params > 0) {
-        cparams = ALLOCA_N(chc_query_param, n_params);
         long base = 2 * n_settings;
         for (long i = 0; i < n_params; i++) {
             VALUE pname = RARRAY_AREF(flat, base + 2 * i);
@@ -726,6 +736,8 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
      * (same out-sink io) so settings and params are included */
     int rc = chc_client_send_query_ex(&nc->ac->cli, RSTRING_PTR(sql), (size_t)RSTRING_LEN(sql),
                                       &qopts, &err);
+    ALLOCV_END(cparams_buf);
+    ALLOCV_END(csettings_buf);
     RB_GC_GUARD(flat);
     RB_GC_GUARD(sql);
     if (rc != CHC_OK) {

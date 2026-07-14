@@ -60,6 +60,16 @@ RSpec.describe ChConnect::Connection do
       GC.auto_compact = previous_auto_compact unless previous_auto_compact.nil?
     end
 
+    it "serializes large parameter maps without exhausting a Ruby thread stack" do
+      worker = Thread.new do
+        params = 40_000.times.to_h { |i| ["param_unused_#{i}", i] }
+        params["param_target"] = "safe"
+        connection.query("SELECT {target:String} AS target", params: params)
+      end
+
+      expect(worker.value.rows).to eq([["safe"]])
+    end
+
     it "serves concurrent queries correctly" do
       results = Array.new(8)
       threads = 8.times.map do |i|
@@ -125,11 +135,10 @@ RSpec.describe ChConnect::Connection do
       expect(rows_with(:zstd)).to eq(plain) if ChConnect::NativeClient::ZSTD_AVAILABLE
     end
 
-    it "allows overriding network_compression_method to an available codec" do
-      skip "zstd not built" unless ChConnect::NativeClient::ZSTD_AVAILABLE
-
-      response = connection.query("SELECT 1 AS one", settings: {network_compression_method: "zstd"})
-      expect(response.rows).to eq([[1]])
+    it "keeps compression configuration authoritative" do
+      expect {
+        connection.query("SELECT 1", settings: {network_compression_method: "zstd"})
+      }.to raise_error(ArgumentError, /config\.compression/)
     end
   end
 
@@ -151,6 +160,22 @@ RSpec.describe ChConnect::Connection do
   end
 
   describe "timeouts" do
+    it "recycles pooled connections after keep_alive_timeout" do
+      idle_config = config.dup.tap do |c|
+        c.keep_alive_timeout = 0
+        c.pool_size = 1
+      end
+      idle_connection = described_class.new(idle_config)
+      allow(ChConnect::NativeClient).to receive(:new).and_call_original
+
+      idle_connection.query("SELECT 1")
+      idle_connection.query("SELECT 2")
+
+      expect(ChConnect::NativeClient).to have_received(:new).twice
+    ensure
+      idle_connection&.close
+    end
+
     it "writes all output through partial nonblocking writes" do
       slot = described_class::Slot.allocate
       client = double("NativeClient")
@@ -255,33 +280,36 @@ RSpec.describe ChConnect::Connection do
   describe "retries" do
     let(:retry_config) { config.dup.tap { |c| c.max_retries = 3 } }
 
-    def fake_client
-      double("NativeClient", close: nil, broken?: false,
-        handshake_step: :done, take_output: nil, feed: nil, recv_step: :done)
-    end
+    it "retries connection establishment failures" do
+      retrying = described_class.new(retry_config)
+      pool = double("ConnectionPool")
+      slot = double("Slot")
+      error = described_class.const_get(:EstablishmentError, false)
+      allow(pool).to receive(:with) { |&block| block.call(slot) }
+      attempts = 0
+      allow(slot).to receive(:query) do
+        attempts += 1
+        raise error, "connect failed" if attempts < 3
 
-    it "retries on ConnectionError and succeeds" do
-      calls = 0
-      fake = fake_client
-      allow(fake).to receive(:send_query) do
-        calls += 1
-        raise ChConnect::ConnectionError, "boom" if calls < 3
+        [[:one], [:UInt8], [[1]], {}]
       end
-      allow(fake).to receive(:take_result).and_return([[:one], [:UInt8], [[1]], {}])
-      allow(ChConnect::NativeClient).to receive(:new).and_return(fake)
+      retrying.instance_variable_set(:@pool, pool)
 
-      expect(described_class.new(retry_config).query("SELECT 1").rows).to eq([[1]])
-      expect(calls).to eq(3)
+      expect(retrying.query("SELECT 1").rows).to eq([[1]])
+      expect(slot).to have_received(:query).exactly(3).times
     end
 
-    it "gives up after max_retries" do
-      fake = fake_client
-      allow(fake).to receive(:send_query).and_raise(ChConnect::ConnectionError, "down")
-      allow(ChConnect::NativeClient).to receive(:new).and_return(fake)
+    it "never retries a query after execution may have started" do
+      retrying = described_class.new(retry_config)
+      pool = double("ConnectionPool")
+      slot = double("Slot")
+      allow(pool).to receive(:with) { |&block| block.call(slot) }
+      allow(slot).to receive(:query).and_raise(ChConnect::ConnectionError, "response lost")
+      retrying.instance_variable_set(:@pool, pool)
 
-      expect { described_class.new(retry_config).query("SELECT 1") }
-        .to raise_error(ChConnect::ConnectionError, "down")
-      expect(fake).to have_received(:send_query).exactly(4).times # initial + 3 retries
+      expect { retrying.query("INSERT INTO t VALUES (1)") }
+        .to raise_error(ChConnect::ConnectionError, "response lost")
+      expect(slot).to have_received(:query).once
     end
   end
 
@@ -329,6 +357,50 @@ RSpec.describe ChConnect::Connection do
 
       expect(tls_connection.query("SELECT 1 AS one").rows).to eq([[1]])
     ensure
+      tls_connection&.close
+    end
+
+    it "reopens inherited TLS connections without shutting down the parent's session" do
+      skip "fork is unavailable" unless Process.respond_to?(:fork)
+
+      tls_config = config.dup.tap do |c|
+        c.port = Integer(ENV["CH_TLS_PORT"])
+        c.ssl = true
+        c.ssl_verify = true
+        c.ssl_ca = ENV.fetch("CH_TLS_CA")
+        c.pool_size = 1
+        c.max_retries = 0
+      end
+      tls_connection = described_class.new(tls_config)
+      tls_connection.query("SELECT 1")
+      pool = tls_connection.instance_variable_get(:@pool)
+      parent_port = pool.with { |slot| slot.instance_variable_get(:@socket).to_io.local_address.ip_port }
+      reader, writer = IO.pipe
+      pid = fork do
+        reader.close
+        begin
+          tls_connection.query("SELECT 1")
+          child_port = pool.with { |slot| slot.instance_variable_get(:@socket).to_io.local_address.ip_port }
+          Marshal.dump([:ok, child_port], writer)
+        rescue => e
+          Marshal.dump([:error, "#{e.class}: #{e.message}"], writer)
+        ensure
+          writer.close
+        end
+        exit! 0
+      end
+      writer.close
+      status, child_port = Marshal.load(reader)
+      Process.wait(pid)
+
+      expect(status).to eq(:ok), "child query failed: #{child_port}"
+      expect(child_port).not_to eq(parent_port)
+      expect(tls_connection.query("SELECT 2").rows).to eq([[2]])
+      expect(pool.with { |slot| slot.instance_variable_get(:@socket).to_io.local_address.ip_port })
+        .to eq(parent_port)
+    ensure
+      reader&.close
+      writer&.close
       tls_connection&.close
     end
 
@@ -394,6 +466,19 @@ RSpec.describe ChConnect::Connection do
     it "returns nil for empty params" do
       expect(connection.send(:format_params, nil)).to be_nil
       expect(connection.send(:format_params, {})).to be_nil
+    end
+
+    it "rejects former HTTP query options instead of silently ignoring them" do
+      expect { connection.query("SELECT 1", params: {max_execution_time: 1}) }
+        .to raise_error(ArgumentError, /pass ClickHouse settings via settings:/)
+      expect { connection.query("SELECT 1", params: {database: "analytics"}) }
+        .to raise_error(ArgumentError, /param_ prefix/)
+    end
+
+    it "protects native decoder settings" do
+      expect {
+        connection.query("SELECT 1", settings: {output_format_native_encode_types_in_binary_format: true})
+      }.to raise_error(ArgumentError, /managed by ch_connect/)
     end
   end
 end

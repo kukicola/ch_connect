@@ -102,7 +102,9 @@ response.to_a      # [{id: 1, name: "Alice", ...}, ...]
 response.summary   # {read_rows: "1", read_bytes: "42", ...}
 ```
 
-`summary[:elapsed_ns]` is client wall-clock time for the complete query.
+`summary[:client_elapsed_ns]` is client wall-clock time for the complete query,
+including pool checkout and connection establishment. Native responses do not
+currently expose the HTTP transport's former server-side `elapsed_ns` metric.
 
 ### Query parameters
 
@@ -114,6 +116,9 @@ response = conn.query(
 ```
 
 `nil` is encoded as the native nullable marker.
+Parameter keys must use the `param_` prefix. Options such as
+`max_execution_time` that older HTTP releases accepted through `params:` must
+move to `settings:`; the database is configured on the connection.
 
 ### Query settings
 
@@ -169,9 +174,10 @@ Unsupported types raise `ChConnect::UnsupportedTypeError` and discard the affect
 | `connection_timeout` | `5` | TCP and protocol handshake timeout in seconds |
 | `read_timeout` | `60` | Maximum time without response data |
 | `write_timeout` | `60` | Socket write deadline in seconds |
+| `keep_alive_timeout` | `60` | Recycle pooled TCP connections after this many idle seconds; `nil` disables recycling |
 | `pool_size` | `100` | Maximum pooled TCP connections |
 | `pool_timeout` | `5` | Pool checkout timeout in seconds |
-| `max_retries` | `3` | Connection-error retries; set to 0 to disable |
+| `max_retries` | `3` | Connection-establishment retries; queries are never retried after sending may have begun |
 | `instrumenter` | `NullInstrumenter` | Object responding to `instrument` |
 
 ## Instrumentation
@@ -203,6 +209,8 @@ end
 ```
 
 Network, timeout, pool, and protocol failures raise `ChConnect::ConnectionError`.
+When migrating from the HTTP client, change port 8123/8443 to the server's
+native port (normally 9000/9440) and replace `scheme` with `ssl` or a native URL.
 
 ## Development
 

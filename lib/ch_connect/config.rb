@@ -13,11 +13,11 @@ module ChConnect
   #   config.url = "clickhouse://user:pass@localhost:9000/mydb"
   class Config
     URL_SCHEMES = {
-      "clickhouse" => [false, 9000],
-      "tcp" => [false, 9000],
-      "clickhouses" => [true, 9440],
-      "tcps" => [true, 9440]
-    }.transform_values(&:freeze).freeze
+      "clickhouse" => false,
+      "tcp" => false,
+      "clickhouses" => true,
+      "tcps" => true
+    }.freeze
 
     DEFAULTS = {
       host: "localhost",
@@ -32,6 +32,7 @@ module ChConnect
       connection_timeout: 5,
       read_timeout: 60,
       write_timeout: 60,
+      keep_alive_timeout: 60,
       pool_size: 100,
       pool_timeout: 5,
       max_retries: 3,
@@ -46,6 +47,7 @@ module ChConnect
     # @return [Integer] Connection timeout in seconds
     # @return [Integer] Read timeout in seconds
     # @return [Integer] Write timeout in seconds
+    # @return [Numeric, nil] Maximum pooled connection idle time in seconds
     # @return [Integer] Connection pool size
     # @return [Integer] Pool checkout timeout in seconds
     # @return [Integer] Max retry attempts on connection errors
@@ -55,7 +57,7 @@ module ChConnect
     # @return [Boolean] Use TLS (default: false)
     # @return [Boolean] Verify the server certificate when ssl is enabled (default: true)
     # @return [String, nil] Path to a CA certificate file for TLS verification (default: system CA store)
-    attr_accessor :compression, :ssl, :ssl_verify, :ssl_ca, :host, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    attr_accessor :compression, :ssl, :ssl_verify, :ssl_ca, :host, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
     attr_writer :port
 
     # Creates a new configuration instance.
@@ -69,11 +71,18 @@ module ChConnect
     # @option params [Integer] :connection_timeout connection timeout in seconds (default: 5)
     # @option params [Integer] :read_timeout read timeout in seconds (default: 60)
     # @option params [Integer] :write_timeout write timeout in seconds (default: 60)
+    # @option params [Numeric, nil] :keep_alive_timeout pooled TCP connection idle timeout (default: 60)
     # @option params [Integer] :pool_size connection pool size (default: 100)
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
     # @option params [Integer] :max_retries max retry attempts on connection errors (default: 3)
     def initialize(params = {})
-      DEFAULTS.merge(params).each do |key, value|
+      DEFAULTS.each do |key, value|
+        send("#{key}=", value)
+      end
+      self.url = params[:url] if params[:url]
+      params.each do |key, value|
+        next if key == :url
+
         send("#{key}=", value)
       end
     end
@@ -90,16 +99,31 @@ module ChConnect
     # @return [void]
     def url=(url)
       uri = URI(url)
-      ssl, fallback_port = URL_SCHEMES.fetch(uri.scheme) do
+      ssl = URL_SCHEMES.fetch(uri.scheme) do
         raise ArgumentError, "unsupported ClickHouse URL scheme: #{uri.scheme.inspect}"
       end
 
       @ssl = ssl
-      @port = uri.port || fallback_port
+      @port = uri.port
       @host = uri.host
-      @database = uri.path.delete_prefix("/")
-      @username = uri.user
-      @password = uri.password
+      database = uri.path.delete_prefix("/")
+      @database = database unless database.empty?
+      @username = uri.user if uri.user
+      @password = uri.password if uri.password
+    end
+
+    # HTTP schemes no longer configure a connection. Use a native URL or the
+    # ssl option instead.
+    def scheme=(_scheme)
+      raise ArgumentError, "scheme was removed; use a clickhouse:// or clickhouses:// URL, or set ssl"
+    end
+
+    # Native TCP is the only transport. Retain the previous explicit native
+    # selection as a harmless migration path while rejecting HTTP.
+    def transport=(transport)
+      return if transport == :native
+
+      raise ArgumentError, "transport was removed; ch_connect now supports only native TCP"
     end
 
     private

@@ -14,6 +14,11 @@ module ChConnect
   # handles one query at a time per connection, so concurrent queries each
   # check out their own connection.
   class Connection
+    # Connection establishment failures are safe to retry because no query
+    # bytes have been sent to the server yet.
+    class EstablishmentError < ConnectionError; end
+    private_constant :EstablishmentError
+
     # Maps config.compression to the chc_compression enum in the extension.
     COMPRESSION_CODES = {nil => 0, :lz4 => 1, :zstd => 2}.freeze
 
@@ -25,6 +30,10 @@ module ChConnect
       "\v" => "\\v", "'" => "\\'", "\\" => "\\\\"
     }.freeze
     PARAM_ESCAPE_PATTERN = /[\0\a\b\e\f\n\r\t\v'\\]/
+    RESERVED_SETTINGS = {
+      "network_compression_method" => "set config.compression instead",
+      "output_format_native_encode_types_in_binary_format" => "required by the native decoder"
+    }.freeze
 
     # A pooled slot owning one socket + protocol state machine pair.
     # Connects lazily and replaces the connection when it is broken or was
@@ -38,6 +47,7 @@ module ChConnect
         @socket = nil
         @client = nil
         @pid = Process.pid
+        @last_used_at = nil
         @read_buf = String.new(capacity: READ_CHUNK)
       end
 
@@ -52,7 +62,9 @@ module ChConnect
           when :want_read then @client.feed(read_chunk)
           end
         end
-        @client.take_result
+        result = @client.take_result
+        @last_used_at = monotonic_now
+        result
       rescue IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "#{e.class}: #{e.message}"
       ensure
@@ -62,19 +74,24 @@ module ChConnect
       end
 
       def close
-        discard
+        discard(inherited: @pid != Process.pid)
       end
 
       private
 
       def ensure_connected
         if @pid != Process.pid
-          discard
+          discard(inherited: true)
           @pid = Process.pid
         end
+        discard if idle?
         discard if @client&.broken? || @socket&.closed?
         return if @client
 
+        establish_connection
+      end
+
+      def establish_connection
         @socket = connect_socket
         @client = NativeClient.new(
           @config.database,
@@ -83,6 +100,10 @@ module ChConnect
           @compression_code
         )
         handshake
+        @last_used_at = monotonic_now
+      rescue ConnectionError, IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
+        discard
+        raise EstablishmentError, "#{e.class}: #{e.message}"
       end
 
       def normalized_username
@@ -205,11 +226,24 @@ module ChConnect
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
-      def discard
-        safe_close(@socket)
+      def idle?
+        timeout = @config.keep_alive_timeout
+        @client && timeout && @last_used_at && monotonic_now - @last_used_at >= timeout
+      end
+
+      def discard(inherited: false)
+        if inherited && @socket.is_a?(OpenSSL::SSL::SSLSocket)
+          # A fork duplicates the fd. Closing the SSLSocket would send a TLS
+          # close_notify on the parent's live session; close only this process's
+          # raw fd instead.
+          safe_close(@socket.to_io)
+        else
+          safe_close(@socket)
+        end
         @client&.close
         @socket = nil
         @client = nil
+        @last_used_at = nil
       end
 
       def safe_close(io)
@@ -268,14 +302,14 @@ module ChConnect
           columns, types, rows, summary = slot.query(sql, params, settings)
           Response.new(columns: columns, types: types, rows: rows, summary: summary)
         end
-      rescue ConnectionError
+      rescue EstablishmentError
         raise if retries >= @config.max_retries
         retries += 1
         retry
       rescue ConnectionPool::TimeoutError => e
         raise ConnectionError, "could not obtain a TCP connection from the pool: #{e.message}"
       end
-      response.summary[:elapsed_ns] = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1_000_000_000).to_i.to_s
+      response.summary[:client_elapsed_ns] = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1_000_000_000).to_i.to_s
       response
     end
 
@@ -302,7 +336,12 @@ module ChConnect
       return nil if params.nil? || params.empty?
 
       params.map do |key, value|
-        [key.to_s.delete_prefix("param_"), quote_param(value)]
+        name = key.to_s
+        unless name.start_with?("param_")
+          raise ArgumentError, "query parameter #{name.inspect} must use the param_ prefix; pass ClickHouse settings via settings:"
+        end
+
+        [name.delete_prefix("param_"), quote_param(value)]
       end
     end
 
@@ -327,6 +366,9 @@ module ChConnect
 
       user_settings&.each do |key, value|
         name = key.to_s
+        if (guidance = RESERVED_SETTINGS[name])
+          raise ArgumentError, "setting #{name.inspect} is managed by ch_connect; #{guidance}"
+        end
         formatted = case value
         when true then "1"
         when false then "0"

@@ -164,9 +164,16 @@ RSpec.describe ChConnect do
       end
 
       it "parses DateTime64" do
-        response = connection.query("SELECT toDateTime64('2024-01-01 12:30:45.123', 3, 'UTC')")
+        response = connection.query(<<~SQL)
+          SELECT
+            toDateTime64('2024-01-01 12:30:45.123', 3, 'UTC'),
+            toDateTime64('1969-12-31 23:59:59.123456789', 9, 'UTC')
+        SQL
 
-        expect(response.rows).to eq([[Time.utc(2024, 1, 1, 12, 30, 45, 123_000)]])
+        expect(response.rows).to eq([[
+          Time.utc(2024, 1, 1, 12, 30, 45, 123_000),
+          Time.utc(1969, 12, 31, 23, 59, 59, Rational(123_456_789, 1_000))
+        ]])
       end
     end
 
@@ -409,7 +416,8 @@ RSpec.describe ChConnect do
         expect(response.summary).to have_key(:read_bytes)
         expect(response.summary).to have_key(:result_rows)
         expect(response.summary).to have_key(:result_bytes)
-        expect(response.summary).to have_key(:elapsed_ns)
+        expect(response.summary).to have_key(:client_elapsed_ns)
+        expect(response.summary).not_to have_key(:elapsed_ns)
         expect(response.summary.values_at(:read_rows, :read_bytes)).to all(be_a(String))
       end
     end
