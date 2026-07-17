@@ -458,11 +458,58 @@ RSpec.describe ChConnect do
 
       it "passes typed parameters (integers, arrays, dates, floats)" do
         response = connection.query(
-          "SELECT {id:UInt64} AS id, {ids:Array(UInt32)} AS ids, {d:Date} AS d, {f:Float64} AS f",
-          params: {id: 123, ids: "[1,2,3]", d: "2024-01-01", f: 1.5}
+          <<~SQL,
+            SELECT
+              {id:UInt64} AS id,
+              {ids:Array(UInt32)} AS ids,
+              {serialized_ids:Array(UInt32)} AS serialized_ids,
+              {d:Date} AS d,
+              {f:Float64} AS f
+          SQL
+          params: {id: 123, ids: [1, 2, 3], serialized_ids: "[4,5]", d: "2024-01-01", f: 1.5}
         )
 
-        expect(response.rows).to eq([[123, [1, 2, 3], Date.new(2024, 1, 1), 1.5]])
+        expect(response.rows).to eq([[123, [1, 2, 3], [4, 5], Date.new(2024, 1, 1), 1.5]])
+      end
+
+      it "passes nested array parameters with escaped strings, nulls, and booleans" do
+        string_values = ["one's", "line\nfeed", "slash\\", "nul:\0 tab:\t", :ruby]
+        nested = [["one", nil], [], ["two"]]
+        dates = [Date.new(2024, 1, 1), Date.new(2025, 12, 31)]
+
+        response = connection.query(
+          <<~SQL,
+            SELECT
+              {strings:Array(String)} AS strings,
+              {nested:Array(Array(Nullable(String)))} AS nested,
+              {flags:Array(Bool)} AS flags,
+              {dates:Array(Date)} AS dates
+          SQL
+          params: {strings: string_values, nested: nested, flags: [true, false], dates: dates}
+        )
+
+        expect(response.rows).to eq([[string_values.map(&:to_s), nested, [true, false], dates]])
+      end
+
+      it "passes arrays mixing binary and UTF-8 strings" do
+        strings = ["\xFF'\0".b, "ż"]
+
+        response = connection.query(
+          "SELECT {strings:Array(String)} AS strings",
+          params: {strings: strings}
+        )
+
+        expect(response.rows.dig(0, 0).map(&:bytes)).to eq(strings.map(&:bytes))
+      end
+
+      it "rejects unsupported and ambiguous array elements" do
+        expect {
+          connection.query("SELECT {values:Array(String)}", params: {values: [{}]})
+        }.to raise_error(ArgumentError, /unsupported array parameter element: Hash/)
+
+        expect {
+          connection.query("SELECT {values:Array(DateTime)}", params: {values: [Time.now]})
+        }.to raise_error(ArgumentError, /Time array parameters are ambiguous; pass a formatted String/)
       end
     end
 

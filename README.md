@@ -144,10 +144,18 @@ response = conn.query(
   "SELECT * FROM users WHERE id = {id:UInt64}",
   params: {id: 123}
 )
+
+response = conn.query(
+  "SELECT * FROM users WHERE tag IN {tags:Array(String)}",
+  params: {tags: ["ruby", "clickhouse"]}
+)
 ```
 
 `nil` is encoded as the native nullable marker.
-Parameter keys match the names used in query placeholders.
+Parameter keys match the names used in query placeholders. Ruby arrays are
+serialized recursively and support strings, symbols, numbers, dates, booleans,
+`nil`, and nested arrays. Other element types raise `ArgumentError`; format
+values such as `Time` and `DateTime` as strings for the target ClickHouse type.
 
 ### Query settings
 

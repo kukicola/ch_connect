@@ -324,9 +324,39 @@ module ChConnect
       # protocol (the dump parser consumes the first escape layer).
       return "'\\\\N'" if value.nil?
 
-      inner_dump = value.to_s.gsub(PARAM_ESCAPE_PATTERN, PARAM_ESCAPES)
+      inner_dump = value.is_a?(Array) ? dump_array_value(value) : escape_param_string(value.to_s)
       outer_dump = inner_dump.gsub(/['\\]/) { |char| "\\#{char}" }
-      "'#{outer_dump}'"
+      "'".b << outer_dump << "'"
+    end
+
+    def dump_array_value(value)
+      case value
+      when nil then "NULL"
+      when Array
+        dump = +"[".b
+        value.each_with_index do |element, index|
+          dump << "," unless index.zero?
+          dump << dump_array_value(element)
+        end
+        dump << "]"
+      when String, Symbol then quote_array_string(value.to_s)
+      when Time, DateTime
+        raise ArgumentError, "#{value.class} array parameters are ambiguous; pass a formatted String"
+      when Date then quote_array_string(value.to_s)
+      when true then "true"
+      when false then "false"
+      when Integer, Float, BigDecimal then value.to_s
+      else
+        raise ArgumentError, "unsupported array parameter element: #{value.class}"
+      end
+    end
+
+    def quote_array_string(value)
+      "'".b << escape_param_string(value) << "'"
+    end
+
+    def escape_param_string(value)
+      value.b.gsub(PARAM_ESCAPE_PATTERN, PARAM_ESCAPES)
     end
 
     # Settings travel as name/value strings in the Query packet. The wire's

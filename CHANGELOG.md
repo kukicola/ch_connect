@@ -3,6 +3,7 @@
 - Switched from HTTP to ClickHouse's native TCP protocol for faster queries and lower allocations
 - Added connection pooling, LZ4/ZSTD compression, TLS, and native ClickHouse URLs
 - Added native query parameters and per-query ClickHouse settings
+- Added support for Ruby array query parameters
 - Improved connection timeouts, retries, fork safety, and idle connection handling
 - Removed HTTP configuration; existing connections must use native ports, normally 9000 or 9440
 
