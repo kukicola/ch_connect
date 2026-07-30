@@ -22,7 +22,7 @@ module ChConnect
   # Raised when a query fails (syntax error, unknown table, etc.)
   class QueryError < Error; end
 
-  # Raised on network/connection failures (retryable)
+  # Raised on network/connection failures
   class ConnectionError < Error; end
 
   # Raised when encountering an unsupported ClickHouse data type

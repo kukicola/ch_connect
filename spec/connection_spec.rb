@@ -321,6 +321,20 @@ RSpec.describe ChConnect::Connection do
   describe "retries" do
     let(:retry_config) { config.dup.tap { |c| c.max_retries = 3 } }
 
+    it "executes default queries only once after a transport failure" do
+      slot = instance_double(slot_class, broken?: true, close: nil)
+      allow(slot_class).to receive(:new).and_return(slot)
+      allow(slot).to receive(:query).and_raise(ChConnect::ConnectionError, "response lost")
+      retrying = described_class.new(retry_config)
+
+      expect { retrying.query("SELECT 1") }
+        .to raise_error(ChConnect::ConnectionError, "response lost")
+      expect(slot).to have_received(:query).once
+      expect(slot_class).to have_received(:new).once
+    ensure
+      retrying&.close
+    end
+
     it "retries connection establishment failures" do
       retrying = described_class.new(retry_config)
       pool = double("ConnectionPool")
@@ -345,21 +359,73 @@ RSpec.describe ChConnect::Connection do
       expect(pool).to have_received(:reap).with(idle_seconds: 60).once
     end
 
-    it "never retries a query after execution may have started" do
+    it "retries idempotent reads on a fresh pooled connection" do
+      failed_slot = instance_double(slot_class, broken?: true, close: nil)
+      fresh_slot = instance_double(slot_class, broken?: false, close: nil)
+      allow(slot_class).to receive(:new).and_return(failed_slot, fresh_slot)
+      allow(failed_slot).to receive(:query)
+        .and_raise(ChConnect::ConnectionError, "Errno::ECONNRESET: Connection reset by peer")
+      allow(fresh_slot).to receive(:query)
+        .and_return([[:one], [:UInt8], [[1]], {}])
+      retrying = described_class.new(retry_config.dup.tap { |c| c.pool_size = 1 })
+
+      expect(retrying.query("SELECT 1", idempotent: true).rows).to eq([[1]])
+      expect(failed_slot).to have_received(:query).once
+      expect(failed_slot).to have_received(:close).once
+      expect(fresh_slot).to have_received(:query).once
+      expect(slot_class).to have_received(:new).twice
+    ensure
+      retrying&.close
+    end
+
+    it "honors max_retries for idempotent transport failures" do
+      limited_config = retry_config.dup.tap do |c|
+        c.max_retries = 2
+        c.pool_size = 1
+      end
+      slots = 3.times.map do
+        instance_double(slot_class, broken?: true, close: nil).tap do |slot|
+          allow(slot).to receive(:query)
+            .and_raise(ChConnect::ConnectionError, "response lost")
+        end
+      end
+      allow(slot_class).to receive(:new).and_return(*slots)
+      retrying = described_class.new(limited_config)
+
+      expect { retrying.query("SELECT 1", idempotent: true) }
+        .to raise_error(ChConnect::ConnectionError, "response lost")
+      expect(slots).to all(have_received(:query).once)
+      expect(slot_class).to have_received(:new).exactly(3).times
+    ensure
+      retrying&.close
+    end
+
+    it "never retries query errors for idempotent queries" do
+      slot = instance_double(slot_class, broken?: false, close: nil)
+      allow(slot_class).to receive(:new).and_return(slot)
+      allow(slot).to receive(:query).and_raise(ChConnect::QueryError, "bad query")
       retrying = described_class.new(retry_config)
-      pool = double("ConnectionPool")
-      slot = double("Slot")
-      allow(pool).to receive(:with) { |&block| block.call(slot) }
-      allow(pool).to receive(:reap)
-      allow(pool).to receive(:discard_current_connection)
+
+      expect { retrying.query("SELECT bad_column", idempotent: true) }
+        .to raise_error(ChConnect::QueryError, "bad query")
+      expect(slot).to have_received(:query).once
+      expect(slot_class).to have_received(:new).once
+    ensure
+      retrying&.close
+    end
+
+    it "keeps writes non-retried by default after execution may have started" do
+      slot = instance_double(slot_class, broken?: true, close: nil)
+      allow(slot_class).to receive(:new).and_return(slot)
       allow(slot).to receive(:query).and_raise(ChConnect::ConnectionError, "response lost")
-      allow(slot).to receive(:broken?).and_return(true)
-      retrying.instance_variable_set(:@pool, pool)
+      retrying = described_class.new(retry_config)
 
       expect { retrying.query("INSERT INTO t VALUES (1)") }
         .to raise_error(ChConnect::ConnectionError, "response lost")
       expect(slot).to have_received(:query).once
-      expect(pool).to have_received(:discard_current_connection).once
+      expect(slot_class).to have_received(:new).once
+    ensure
+      retrying&.close
     end
   end
 

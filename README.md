@@ -10,7 +10,7 @@ Fast MRI Ruby client for ClickHouse's native TCP protocol.
 - Persistent pooled connections safe for concurrent use
 - LZ4 or ZSTD block compression
 - TLS with certificate verification
-- Automatic retries on connection failures
+- Safe connection-establishment retries and opt-in retries for idempotent queries
 - Interruptible connect, read, and write timeouts
 - Common ClickHouse scalar and composite types
 
@@ -115,6 +115,28 @@ threads.each(&:join)
 Configuration is copied when a `Connection` is created. Create a new connection
 to apply configuration changes.
 
+### Idempotent retries
+
+Queries are not retried after execution may have started unless the caller
+explicitly marks the operation as idempotent:
+
+```ruby
+response = conn.query(
+  "SELECT * FROM users WHERE id = {id:UInt64}",
+  params: {id: 123},
+  idempotent: true
+)
+```
+
+With `idempotent: true`, a transport `ChConnect::ConnectionError` is retried on
+a fresh pooled connection up to `max_retries`. Connection-establishment
+failures continue to use the same retry limit for every query because no query
+has been sent. `ChConnect::QueryError` is never retried.
+
+Only opt in when repeating the complete operation is safe. In particular,
+writes remain non-retried by default because a lost response does not prove
+that ClickHouse did not apply the write.
+
 ### Results
 
 `Response` implements `Enumerable`:
@@ -214,7 +236,7 @@ Unsupported types raise `ChConnect::UnsupportedTypeError` and discard the affect
 | `keep_alive_timeout` | `60` | Recycle pooled TCP connections after this many idle seconds; `nil` disables recycling |
 | `pool_size` | `100` | Maximum pooled TCP connections |
 | `pool_timeout` | `5` | Pool checkout timeout in seconds |
-| `max_retries` | `3` | Connection-establishment retries; queries are never retried after sending may have begun |
+| `max_retries` | `3` | Retry limit for connection establishment and opted-in idempotent query transport failures |
 | `instrumenter` | `NullInstrumenter` | Object responding to `instrument` |
 
 ## Instrumentation
@@ -246,6 +268,8 @@ end
 ```
 
 Network, timeout, pool, and protocol failures raise `ChConnect::ConnectionError`.
+They are retried after a query may have started only when `idempotent: true`;
+server `ChConnect::QueryError` responses are never retried.
 When migrating from the HTTP client, change port 8123/8443 to the server's
 native port (normally 9000/9440) and replace `scheme` with `ssl` or a native URL.
 

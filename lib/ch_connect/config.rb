@@ -50,7 +50,8 @@ module ChConnect
     # @return [Numeric, nil] Maximum pooled connection idle time in seconds
     # @return [Integer] Connection pool size
     # @return [Integer] Pool checkout timeout in seconds
-    # @return [Integer] Max retry attempts on connection errors
+    # @return [Integer] Max retries for establishment failures and opted-in
+    #   idempotent query transport failures
     # @return [#instrument] Instrumenter for query instrumentation
     # @return [Integer] Native protocol port
     # @return [Symbol, nil] Block compression: :lz4 (default), :zstd or nil
@@ -74,7 +75,8 @@ module ChConnect
     # @option params [Numeric, nil] :keep_alive_timeout pooled TCP connection idle timeout (default: 60)
     # @option params [Integer] :pool_size connection pool size (default: 100)
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
-    # @option params [Integer] :max_retries max retry attempts on connection errors (default: 3)
+    # @option params [Integer] :max_retries max retries for establishment
+    #   failures and opted-in idempotent query transport failures (default: 3)
     def initialize(params = {})
       DEFAULTS.merge(params).each do |key, value|
         send("#{key}=", value)

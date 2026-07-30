@@ -252,11 +252,14 @@ module ChConnect
     # @param sql [String] SQL query to execute
     # @param params [Hash, nil] query parameters (name => value)
     # @param settings [Hash, nil] per-query ClickHouse settings
+    # @param idempotent [Boolean] retry transport failures on a fresh connection
+    #   up to config.max_retries (default: false)
     # @return [Response] fully parsed response
     # @raise [QueryError] if the query fails
-    def query(sql, params: nil, settings: nil)
+    # @raise [ConnectionError] if a connection or transport operation fails
+    def query(sql, params: nil, settings: nil, idempotent: false)
       @config.instrumenter.instrument("query.clickhouse", {sql: sql}) do
-        execute_query(sql, params, settings)
+        execute_query(sql, params, settings, idempotent)
       end
     end
 
@@ -269,7 +272,7 @@ module ChConnect
 
     private
 
-    def execute_query(sql, user_params, user_settings)
+    def execute_query(sql, user_params, user_settings, idempotent)
       started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
       params = format_params(user_params)
       settings = format_settings(user_settings)
@@ -283,6 +286,11 @@ module ChConnect
           @pool.discard_current_connection(&:close) if slot.broken?
         end
       rescue EstablishmentError
+        raise if retries >= @config.max_retries
+        retries += 1
+        retry
+      rescue ConnectionError
+        raise unless idempotent
         raise if retries >= @config.max_retries
         retries += 1
         retry
