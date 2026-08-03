@@ -319,7 +319,12 @@ RSpec.describe ChConnect::Connection do
   end
 
   describe "retries" do
-    let(:retry_config) { config.dup.tap { |c| c.max_retries = 3 } }
+    let(:retry_config) do
+      config.dup.tap do |c|
+        c.max_retries = 3
+        c.retry_base_interval = 0
+      end
+    end
 
     it "executes default queries only once after a transport failure" do
       slot = instance_double(slot_class, broken?: true, close: nil)
@@ -396,6 +401,33 @@ RSpec.describe ChConnect::Connection do
         .to raise_error(ChConnect::ConnectionError, "response lost")
       expect(slots).to all(have_received(:query).once)
       expect(slot_class).to have_received(:new).exactly(3).times
+    ensure
+      retrying&.close
+    end
+
+    it "uses capped exponential backoff with jitter between attempts" do
+      delayed_config = retry_config.dup.tap do |c|
+        c.retry_base_interval = 0.1
+        c.retry_max_interval = 0.15
+        c.pool_size = 1
+      end
+      slots = 3.times.map do
+        instance_double(slot_class, broken?: true, close: nil)
+      end
+      allow(slots[0]).to receive(:query)
+        .and_raise(ChConnect::ConnectionError, "first failure")
+      allow(slots[1]).to receive(:query)
+        .and_raise(ChConnect::ConnectionError, "second failure")
+      allow(slots[2]).to receive(:query)
+        .and_return([[:one], [:UInt8], [[1]], {}])
+      allow(slot_class).to receive(:new).and_return(*slots)
+      retrying = described_class.new(delayed_config)
+      allow(retrying).to receive(:rand).and_return(0.0, 1.0)
+      delays = []
+      allow(retrying).to receive(:sleep) { |delay| delays << delay }
+
+      expect(retrying.query("SELECT 1", idempotent: true).rows).to eq([[1]])
+      expect(delays).to eq([0.05, 0.15])
     ensure
       retrying&.close
     end

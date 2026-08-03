@@ -16,6 +16,9 @@ RSpec.describe ChConnect::Config do
       expect(config.read_timeout).to eq(60)
       expect(config.write_timeout).to eq(60)
       expect(config.keep_alive_timeout).to eq(60)
+      expect(config.max_retries).to eq(3)
+      expect(config.retry_base_interval).to eq(0.05)
+      expect(config.retry_max_interval).to eq(1.0)
     end
 
     it "accepts custom values" do
@@ -28,7 +31,9 @@ RSpec.describe ChConnect::Config do
         password: "secret",
         connection_timeout: 10,
         read_timeout: 120,
-        write_timeout: 30
+        write_timeout: 30,
+        retry_base_interval: 0.1,
+        retry_max_interval: 2.0
       )
 
       expect(config.host).to eq("clickhouse.example.com")
@@ -40,6 +45,8 @@ RSpec.describe ChConnect::Config do
       expect(config.connection_timeout).to eq(10)
       expect(config.read_timeout).to eq(120)
       expect(config.write_timeout).to eq(30)
+      expect(config.retry_base_interval).to eq(0.1)
+      expect(config.retry_max_interval).to eq(2.0)
     end
 
     it "derives the default port from TLS mode" do

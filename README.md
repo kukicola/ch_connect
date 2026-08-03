@@ -131,7 +131,9 @@ response = conn.query(
 With `idempotent: true`, a transport `ChConnect::ConnectionError` is retried on
 a fresh pooled connection up to `max_retries`. Connection-establishment
 failures continue to use the same retry limit for every query because no query
-has been sent. `ChConnect::QueryError` is never retried.
+has been sent. Retries use exponential backoff with jitter, starting at
+`retry_base_interval` and capped at `retry_max_interval`; set the base interval
+to `0` to disable the delay. `ChConnect::QueryError` is never retried.
 
 Only opt in when repeating the complete operation is safe. In particular,
 writes remain non-retried by default because a lost response does not prove
@@ -237,6 +239,8 @@ Unsupported types raise `ChConnect::UnsupportedTypeError` and discard the affect
 | `pool_size` | `100` | Maximum pooled TCP connections |
 | `pool_timeout` | `5` | Pool checkout timeout in seconds |
 | `max_retries` | `3` | Retry limit for connection establishment and opted-in idempotent query transport failures |
+| `retry_base_interval` | `0.05` | Initial retry delay in seconds; retries use exponential backoff with jitter, and `0` disables the delay |
+| `retry_max_interval` | `1.0` | Maximum retry delay in seconds |
 | `instrumenter` | `NullInstrumenter` | Object responding to `instrument` |
 
 ## Instrumentation

@@ -288,11 +288,13 @@ module ChConnect
       rescue EstablishmentError
         raise if retries >= @config.max_retries
         retries += 1
+        backoff_before_retry(retries)
         retry
       rescue ConnectionError
         raise unless idempotent
         raise if retries >= @config.max_retries
         retries += 1
+        backoff_before_retry(retries)
         retry
       rescue ConnectionPool::TimeoutError => e
         raise ConnectionError, "could not obtain a TCP connection from the pool: #{e.message}"
@@ -304,6 +306,14 @@ module ChConnect
     def reap_idle_connections
       timeout = @config.keep_alive_timeout
       @pool.reap(idle_seconds: timeout, &:close) if timeout
+    end
+
+    def backoff_before_retry(retry_number)
+      base = @config.retry_base_interval
+      return unless base.positive?
+
+      ceiling = [base * (2**(retry_number - 1)), @config.retry_max_interval].min
+      sleep(ceiling * (0.5 + rand * 0.5))
     end
 
     def validate_compression!

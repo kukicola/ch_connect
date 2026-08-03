@@ -36,6 +36,8 @@ module ChConnect
       pool_size: 100,
       pool_timeout: 5,
       max_retries: 3,
+      retry_base_interval: 0.05,
+      retry_max_interval: 1.0,
       instrumenter: NullInstrumenter.new
     }.freeze
 
@@ -52,13 +54,15 @@ module ChConnect
     # @return [Integer] Pool checkout timeout in seconds
     # @return [Integer] Max retries for establishment failures and opted-in
     #   idempotent query transport failures
+    # @return [Numeric] Initial retry delay in seconds; zero disables backoff
+    # @return [Numeric] Maximum retry delay in seconds
     # @return [#instrument] Instrumenter for query instrumentation
     # @return [Integer] Native protocol port
     # @return [Symbol, nil] Block compression: :lz4 (default), :zstd or nil
     # @return [Boolean] Use TLS (default: false)
     # @return [Boolean] Verify the server certificate when ssl is enabled (default: true)
     # @return [String, nil] Path to a CA certificate file for TLS verification (default: system CA store)
-    attr_accessor :compression, :ssl, :ssl_verify, :ssl_ca, :host, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :instrumenter
+    attr_accessor :compression, :ssl, :ssl_verify, :ssl_ca, :host, :database, :username, :password, :connection_timeout, :read_timeout, :write_timeout, :keep_alive_timeout, :pool_size, :pool_timeout, :max_retries, :retry_base_interval, :retry_max_interval, :instrumenter
     attr_writer :port
 
     # Creates a new configuration instance.
@@ -77,6 +81,10 @@ module ChConnect
     # @option params [Integer] :pool_timeout pool checkout timeout (default: 5)
     # @option params [Integer] :max_retries max retries for establishment
     #   failures and opted-in idempotent query transport failures (default: 3)
+    # @option params [Numeric] :retry_base_interval initial retry delay in
+    #   seconds, with exponential backoff and jitter (default: 0.05)
+    # @option params [Numeric] :retry_max_interval maximum retry delay in
+    #   seconds (default: 1.0)
     def initialize(params = {})
       DEFAULTS.merge(params).each do |key, value|
         send("#{key}=", value)
