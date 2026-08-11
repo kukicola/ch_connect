@@ -261,6 +261,26 @@ RSpec.describe ChConnect do
       end
     end
 
+    describe "geometry types" do
+      it "parses LineString and MultiLineString" do
+        response = connection.query(<<~SQL)
+          SELECT
+            [(0.0, 0.0), (1.0, 2.0)]::LineString AS line,
+            [[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+             [(2.0, 2.0), (3.0, 3.0)]]::MultiLineString AS multi_line
+        SQL
+
+        expect(response.types).to eq(%i[LineString MultiLineString])
+        expect(response.rows).to eq([[
+          [[0.0, 0.0], [1.0, 2.0]],
+          [
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            [[2.0, 2.0], [3.0, 3.0]]
+          ]
+        ]])
+      end
+    end
+
     describe "tuple type" do
       it "parses Tuple" do
         response = connection.query("SELECT tuple(1, 'hello', 3.14)")

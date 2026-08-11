@@ -377,9 +377,85 @@ decode_string_column(const chc_column *col, long n_rows)
     return ary;
 }
 
+static void
+raise_invalid_geometry(native_state *state, const char *detail)
+{
+    *state = NATIVE_BROKEN;
+    rb_raise(eConnectionError, "Invalid native geometry column: %s", detail);
+}
+
+/* clickhouse-c exposes geometry aliases as their wire-level Array/Tuple
+ * column tree, while the logical geometry type has no synthetic children. */
+static VALUE
+decode_geometry(const chc_column *col, long n_rows, int depth, native_state *state)
+{
+    if (n_rows == 0) return rb_ary_new();
+
+    if (depth == 0) {
+        if (chc_column_layout(col) != CHC_COL_TUPLE ||
+            chc_column_tuple_arity(col) != 2) {
+            raise_invalid_geometry(state, "Point must be a two-coordinate tuple");
+        }
+
+        const chc_column *x_col = chc_column_tuple_child(col, 0);
+        const chc_column *y_col = chc_column_tuple_child(col, 1);
+        size_t x_size = 0;
+        size_t y_size = 0;
+        const uint8_t *x = (const uint8_t *)chc_column_fixed_data(x_col, &x_size);
+        const uint8_t *y = (const uint8_t *)chc_column_fixed_data(y_col, &y_size);
+        if (!x || !y || x_size != 8 || y_size != 8) {
+            raise_invalid_geometry(state, "Point coordinates must be Float64 columns");
+        }
+
+        VALUE points = rb_ary_new_capa(n_rows);
+        for (long i = 0; i < n_rows; i++) {
+            VALUE point = rb_ary_new_capa(2);
+            rb_ary_push(point, DBL2NUM(load_f64le(x + i * 8)));
+            rb_ary_push(point, DBL2NUM(load_f64le(y + i * 8)));
+            rb_ary_push(points, point);
+        }
+        return points;
+    }
+
+    if (chc_column_layout(col) != CHC_COL_ARRAY) {
+        raise_invalid_geometry(state, "expected an Array layer");
+    }
+
+    const uint64_t *offsets = chc_column_array_offsets(col);
+    const chc_column *values_col = chc_column_array_values(col);
+    long total = (long)chc_column_n_rows(values_col);
+    VALUE elements = decode_geometry(values_col, total, depth - 1, state);
+    VALUE ary = rb_ary_new_capa(n_rows);
+    uint64_t start = 0;
+    for (long i = 0; i < n_rows; i++) {
+        uint64_t end = offsets[i];
+        if (end < start || end > (uint64_t)RARRAY_LEN(elements)) {
+            raise_invalid_geometry(state, "Array offset is out of bounds");
+        }
+        rb_ary_push(ary, rb_ary_subseq(elements, (long)start, (long)(end - start)));
+        start = end;
+    }
+    return ary;
+}
+
 static VALUE
 decode_column(const chc_column *col, const chc_type *t, long n_rows, native_state *state)
 {
+    switch (chc_type_kind(t)) {
+    case CHC_POINT:
+        return decode_geometry(col, n_rows, 0, state);
+    case CHC_RING:
+    case CHC_LINE_STRING:
+        return decode_geometry(col, n_rows, 1, state);
+    case CHC_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        return decode_geometry(col, n_rows, 2, state);
+    case CHC_MULTI_POLYGON:
+        return decode_geometry(col, n_rows, 3, state);
+    default:
+        break;
+    }
+
     if (n_rows == 0) {
         chc_kind kind = chc_type_kind(t);
         if (kind == CHC_STRING) return rb_ary_new();
