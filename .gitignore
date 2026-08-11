@@ -10,3 +10,14 @@
 
 .rspec_status
 Gemfile.lock
+
+# native extension build artifacts
+ext/ch_connect_native/Makefile
+ext/ch_connect_native/*.o
+ext/ch_connect_native/*.bundle
+ext/ch_connect_native/*.so
+ext/ch_connect_native/*.dSYM/
+ext/ch_connect_native/mkmf.log
+ext/ch_connect_native/extconf.h
+lib/ch_connect/*.bundle
+lib/ch_connect/*.so

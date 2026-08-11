@@ -1,5 +1,14 @@
 ## Unreleased
 
+- Switched from HTTP to ClickHouse's native TCP protocol for faster queries and lower allocations
+- Added connection pooling, LZ4/ZSTD compression, TLS, and native ClickHouse URLs
+- Added native query parameters and per-query ClickHouse settings
+- Added support for Ruby array query parameters
+- Added opt-in `idempotent: true` query retries for transport failures on fresh pooled connections
+- Added configurable capped exponential backoff with jitter between connection retries
+- Improved connection timeouts, retries, fork safety, and idle connection handling
+- Removed HTTP configuration; existing connections must use native ports, normally 9000 or 9440
+
 ## [0.2.2] - 2026-05-06
 
 - Added configurable `keep_alive_timeout` for idle persistent connections (default: 8s) ([#7](https://github.com/kukicola/ch_connect/pull/7))

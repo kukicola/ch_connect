@@ -3,19 +3,7 @@
 require_relative "../benchmark_helper"
 require_relative "../adapters"
 
-BIG_QUERY = <<~SQL.strip
-  SELECT
-    number AS id,
-    toUInt8(number % 256) AS uint8_col,
-    toUInt32(number) AS uint32_col,
-    toFloat64(number / 1000.0) AS float64_col,
-    toString(number) AS string_col,
-    toDate('2024-01-01') + number AS date_col,
-    toDateTime('2024-01-01') + number AS datetime_col,
-    [number, number+1, number+2] AS array_col
-  FROM system.numbers
-  LIMIT 100000
-SQL
+BIG_QUERY = BenchmarkHelper::BIG_QUERY
 
 puts "=" * 60
 puts "SCENARIO 2: Big Query Benchmark"
@@ -24,12 +12,7 @@ puts "Testing large result set parsing (100K rows, various types)"
 puts
 
 config = BenchmarkHelper::CONFIG
-adapters = {
-  ch_connect: Adapters::ChConnectAdapter.new(config),
-  click_house: Adapters::ClickHouseAdapter.new(config),
-  clickhouse: Adapters::ClickhouseAdapter.new(config),
-  gitlab: Adapters::GitlabAdapter.new(config)
-}
+adapters = Adapters.build_all(config)
 
 BenchmarkHelper.verify_results(adapters, BIG_QUERY)
 

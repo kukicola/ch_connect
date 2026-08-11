@@ -10,8 +10,10 @@ end
 
 require "ch_connect"
 
+Dir[File.join(__dir__, "support", "*.rb")].sort.each { |f| require f }
+
 ChConnect.configure do |config|
-  config.url = ENV.fetch("CLICKHOUSE_URL", "http://localhost:8123/default")
+  config.url = ENV.fetch("CLICKHOUSE_URL", "clickhouse://localhost:9000/default")
 end
 
 RSpec.configure do |config|

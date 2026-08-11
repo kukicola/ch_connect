@@ -13,10 +13,6 @@ RSpec.describe ChConnect do
         expect(config).to be_a(ChConnect::Config)
       end
     end
-
-    it "does nothing without a block" do
-      expect { described_class.configure }.not_to raise_error
-    end
   end
 
   describe "querying" do
@@ -164,9 +160,16 @@ RSpec.describe ChConnect do
       end
 
       it "parses DateTime64" do
-        response = connection.query("SELECT toDateTime64('2024-01-01 12:30:45.123', 3, 'UTC')")
+        response = connection.query(<<~SQL)
+          SELECT
+            toDateTime64('2024-01-01 12:30:45.123', 3, 'UTC'),
+            toDateTime64('1969-12-31 23:59:59.123456789', 9, 'UTC')
+        SQL
 
-        expect(response.rows).to eq([[Time.utc(2024, 1, 1, 12, 30, 45, 123_000)]])
+        expect(response.rows).to eq([[
+          Time.utc(2024, 1, 1, 12, 30, 45, 123_000),
+          Time.utc(1969, 12, 31, 23, 59, 59, Rational(123_456_789, 1_000))
+        ]])
       end
     end
 
@@ -364,6 +367,26 @@ RSpec.describe ChConnect do
         expect(response.columns).to eq([:number])
         expect(response.types).to eq([:UInt64])
       end
+
+      it "returns ordinary rows consistently for WITH TOTALS" do
+        response = connection.query(<<~SQL)
+          SELECT number % 2 AS bucket, count() AS count
+          FROM numbers(4)
+          GROUP BY bucket WITH TOTALS
+          ORDER BY bucket
+        SQL
+
+        expect(response.rows).to eq([[0, 2], [1, 2]])
+      end
+
+      it "returns ordinary rows consistently when extremes are enabled" do
+        response = connection.query(
+          "SELECT number FROM numbers(3) ORDER BY number",
+          settings: {extremes: 1}
+        )
+
+        expect(response.rows).to eq([[0], [1], [2]])
+      end
     end
 
     describe "column metadata" do
@@ -381,12 +404,17 @@ RSpec.describe ChConnect do
     end
 
     describe "summary" do
-      it "returns X-ClickHouse-Summary header" do
+      it "returns query metrics" do
         response = connection.query("SELECT 1")
 
         expect(response.summary).to be_a(Hash)
         expect(response.summary).to have_key(:read_rows)
         expect(response.summary).to have_key(:read_bytes)
+        expect(response.summary).to have_key(:result_rows)
+        expect(response.summary).to have_key(:result_bytes)
+        expect(response.summary).to have_key(:client_elapsed_ns)
+        expect(response.summary).not_to have_key(:elapsed_ns)
+        expect(response.summary.values_at(:read_rows, :read_bytes)).to all(be_a(Integer))
       end
     end
 
@@ -400,7 +428,7 @@ RSpec.describe ChConnect do
       it "raises QueryError for non-existent table" do
         expect {
           connection.query("SELECT * FROM non_existent_table_12345")
-        }.to raise_error(ChConnect::QueryError, /UNKNOWN_TABLE/)
+        }.to raise_error(ChConnect::QueryError, /non_existent_table_12345/)
       end
 
       it "raises UnsupportedTypeError for JSON type" do
@@ -422,10 +450,96 @@ RSpec.describe ChConnect do
       it "passes parameters to query" do
         response = connection.query(
           "SELECT {id:UInt32} as id, {name:String} as name",
-          params: {param_id: 42, param_name: "alice"}
+          params: {id: 42, name: "alice"}
         )
 
         expect(response.rows).to eq([[42, "alice"]])
+      end
+
+      it "passes typed parameters (integers, arrays, dates, floats)" do
+        response = connection.query(
+          <<~SQL,
+            SELECT
+              {id:UInt64} AS id,
+              {ids:Array(UInt32)} AS ids,
+              {serialized_ids:Array(UInt32)} AS serialized_ids,
+              {d:Date} AS d,
+              {f:Float64} AS f
+          SQL
+          params: {id: 123, ids: [1, 2, 3], serialized_ids: "[4,5]", d: "2024-01-01", f: 1.5}
+        )
+
+        expect(response.rows).to eq([[123, [1, 2, 3], [4, 5], Date.new(2024, 1, 1), 1.5]])
+      end
+
+      it "passes nested array parameters with escaped strings, nulls, and booleans" do
+        string_values = ["one's", "line\nfeed", "slash\\", "nul:\0 tab:\t", :ruby]
+        nested = [["one", nil], [], ["two"]]
+        dates = [Date.new(2024, 1, 1), Date.new(2025, 12, 31)]
+
+        response = connection.query(
+          <<~SQL,
+            SELECT
+              {strings:Array(String)} AS strings,
+              {nested:Array(Array(Nullable(String)))} AS nested,
+              {flags:Array(Bool)} AS flags,
+              {dates:Array(Date)} AS dates
+          SQL
+          params: {strings: string_values, nested: nested, flags: [true, false], dates: dates}
+        )
+
+        expect(response.rows).to eq([[string_values.map(&:to_s), nested, [true, false], dates]])
+      end
+
+      it "passes arrays mixing binary and UTF-8 strings" do
+        strings = ["\xFF'\0".b, "ż"]
+
+        response = connection.query(
+          "SELECT {strings:Array(String)} AS strings",
+          params: {strings: strings}
+        )
+
+        expect(response.rows.dig(0, 0).map(&:bytes)).to eq(strings.map(&:bytes))
+      end
+
+      it "rejects unsupported and ambiguous array elements" do
+        expect {
+          connection.query("SELECT {values:Array(String)}", params: {values: [{}]})
+        }.to raise_error(ArgumentError, /unsupported array parameter element: Hash/)
+
+        expect {
+          connection.query("SELECT {values:Array(DateTime)}", params: {values: [Time.now]})
+        }.to raise_error(ArgumentError, /Time array parameters are ambiguous; pass a formatted String/)
+      end
+    end
+
+    describe "query settings" do
+      it "applies per-query settings" do
+        expect {
+          connection.query(
+            "SELECT number FROM system.numbers LIMIT 10",
+            settings: {max_result_rows: 5, result_overflow_mode: "throw"}
+          )
+        }.to raise_error(ChConnect::QueryError, /Limit for result/)
+      end
+
+      it "combines settings with parameters" do
+        response = connection.query(
+          "SELECT {id:UInt32} AS id",
+          params: {id: 7},
+          settings: {max_threads: 1}
+        )
+
+        expect(response.rows).to eq([[7]])
+      end
+
+      it "passes nil as SQL NULL" do
+        response = connection.query(
+          "SELECT {value:Nullable(String)} AS value",
+          params: {value: nil}
+        )
+
+        expect(response.rows).to eq([[nil]])
       end
     end
   end

@@ -22,7 +22,7 @@ jobs:
       clickhouse:
         image: clickhouse/clickhouse-server:latest
         ports:
-          - 8123:8123
+          - 9000:9000
         options: >-
           --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
           --health-interval 10s
@@ -40,10 +40,25 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
 
+      - name: Install native extension dependencies
+        run: sudo apt-get update && sudo apt-get install -y liblz4-dev libzstd-dev
+
+      - name: Compile native extension
+        run: |
+          cd ext/ch_connect_native
+          ruby extconf.rb
+          make
+          cp "ch_connect_native.$(ruby -rrbconfig -e 'print RbConfig::CONFIG["DLEXT"]')" ../../lib/ch_connect/
+
+      - name: Start TLS-enabled ClickHouse
+        run: spec/support/start_tls_clickhouse.sh "$RUNNER_TEMP/ch-tls" password
+
       - name: Run tests
         run: bundle exec rspec
         env:
-          CLICKHOUSE_URL: http://default:password@localhost:8123/default
+          CLICKHOUSE_URL: clickhouse://default:password@localhost:9000/default
+          CH_TLS_PORT: "9440"
+          CH_TLS_CA: ${{ runner.temp }}/ch-tls/server.crt
 
   lint:
     runs-on: ubuntu-latest

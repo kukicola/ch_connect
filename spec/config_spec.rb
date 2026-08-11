@@ -2,106 +2,104 @@
 
 RSpec.describe ChConnect::Config do
   describe "#initialize" do
-    it "has default values" do
+    it "has native TCP defaults" do
       config = described_class.new
 
-      expect(config.scheme).to eq("http")
       expect(config.host).to eq("localhost")
-      expect(config.port).to eq(8123)
+      expect(config.port).to eq(9000)
+      expect(config.ssl).to be(false)
+      expect(config.compression).to eq(:lz4)
       expect(config.database).to eq("default")
-      expect(config.username).to eq("")
+      expect(config.username).to eq("default")
       expect(config.password).to eq("")
       expect(config.connection_timeout).to eq(5)
       expect(config.read_timeout).to eq(60)
       expect(config.write_timeout).to eq(60)
-      expect(config.keep_alive_timeout).to eq(8)
+      expect(config.keep_alive_timeout).to eq(60)
+      expect(config.max_retries).to eq(3)
+      expect(config.retry_base_interval).to eq(0.05)
+      expect(config.retry_max_interval).to eq(1.0)
     end
 
     it "accepts custom values" do
       config = described_class.new(
-        scheme: "https",
         host: "clickhouse.example.com",
-        port: 8443,
+        port: 9440,
+        ssl: true,
         database: "analytics",
         username: "admin",
         password: "secret",
         connection_timeout: 10,
         read_timeout: 120,
-        write_timeout: 30
+        write_timeout: 30,
+        retry_base_interval: 0.1,
+        retry_max_interval: 2.0
       )
 
-      expect(config.scheme).to eq("https")
       expect(config.host).to eq("clickhouse.example.com")
-      expect(config.port).to eq(8443)
+      expect(config.port).to eq(9440)
+      expect(config.ssl).to be(true)
       expect(config.database).to eq("analytics")
       expect(config.username).to eq("admin")
       expect(config.password).to eq("secret")
       expect(config.connection_timeout).to eq(10)
       expect(config.read_timeout).to eq(120)
       expect(config.write_timeout).to eq(30)
+      expect(config.retry_base_interval).to eq(0.1)
+      expect(config.retry_max_interval).to eq(2.0)
     end
 
-    it "merges custom values with defaults" do
-      config = described_class.new(host: "remote.example.com", port: 9000)
-
-      expect(config.host).to eq("remote.example.com")
-      expect(config.port).to eq(9000)
-      expect(config.scheme).to eq("http")
-      expect(config.database).to eq("default")
+    it "derives the default port from TLS mode" do
+      expect(described_class.new.port).to eq(9000)
+      expect(described_class.new(ssl: true).port).to eq(9440)
     end
   end
 
   describe "#url=" do
-    it "parses full URL" do
+    it "parses a native URL" do
       config = described_class.new
-      config.url = "https://user:pass@clickhouse.example.com:8443/mydb"
+      config.url = "clickhouse://user:pass@clickhouse.example.com:9010/mydb"
 
-      expect(config.scheme).to eq("https")
       expect(config.host).to eq("clickhouse.example.com")
-      expect(config.port).to eq(8443)
+      expect(config.port).to eq(9010)
+      expect(config.ssl).to be(false)
       expect(config.database).to eq("mydb")
       expect(config.username).to eq("user")
       expect(config.password).to eq("pass")
     end
 
-    it "parses URL without credentials" do
+    it "uses native defaults for portless URLs" do
       config = described_class.new
-      config.url = "http://localhost:8123/default"
+      config.url = "clickhouse://clickhouse.example.com/analytics"
+      expect(config.port).to eq(9000)
+      expect(config.ssl).to be(false)
 
-      expect(config.scheme).to eq("http")
+      config.url = "clickhouses://clickhouse.example.com/analytics"
+      expect(config.port).to eq(9440)
+      expect(config.ssl).to be(true)
+    end
+
+    it "accepts tcp aliases" do
+      config = described_class.new
+      config.url = "tcps://clickhouse.example.com/data"
+
+      expect(config.port).to eq(9440)
+      expect(config.ssl).to be(true)
+    end
+
+    it "handles URLs without credentials or a database path" do
+      config = described_class.new
+      config.url = "clickhouse://localhost:9000"
+
       expect(config.host).to eq("localhost")
-      expect(config.port).to eq(8123)
       expect(config.database).to eq("default")
-      expect(config.username).to be_nil
-      expect(config.password).to be_nil
+      expect(config.username).to eq("default")
+      expect(config.password).to eq("")
     end
 
-    it "parses URL with empty database path" do
-      config = described_class.new
-      config.url = "http://localhost:8123/"
-
-      expect(config.database).to eq("")
-    end
-
-    it "handles URL without trailing slash" do
-      config = described_class.new
-      config.url = "http://localhost:8123"
-
-      expect(config.host).to eq("localhost")
-      expect(config.port).to eq(8123)
-      expect(config.database).to eq("")
-    end
-  end
-
-  describe "attribute accessors" do
-    it "allows setting values after initialization" do
-      config = described_class.new
-
-      config.host = "new-host.example.com"
-      config.port = 9999
-
-      expect(config.host).to eq("new-host.example.com")
-      expect(config.port).to eq(9999)
+    it "rejects non-native schemes" do
+      expect { described_class.new.url = "https://clickhouse.example.com/data" }
+        .to raise_error(ArgumentError, /unsupported ClickHouse URL scheme/)
     end
   end
 end
