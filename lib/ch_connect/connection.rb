@@ -237,7 +237,7 @@ module ChConnect
     def initialize(config = ChConnect.config)
       @config = config.dup.freeze
       validate_compression!
-      @codec_name = @config.compression&.to_s
+      @codec_name = @config.compression&.to_s&.upcase
       @pool = ConnectionPool.new(
         size: @config.pool_size,
         timeout: @config.pool_timeout,
