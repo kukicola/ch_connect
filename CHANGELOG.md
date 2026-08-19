@@ -1,5 +1,11 @@
 ## Unreleased
 
+## [0.3.1] - 2026-08-19
+
+- Fixed LZ4 compression negotiation for ClickHouse users configured with `readonly = 1`
+
+## [0.3.0] - 2026-08-11
+
 - Switched from HTTP to ClickHouse's native TCP protocol for faster queries and lower allocations
 - Added connection pooling, LZ4/ZSTD compression, TLS, and native ClickHouse URLs
 - Added native query parameters and per-query ClickHouse settings
