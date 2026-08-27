@@ -1,7 +1,7 @@
 # Vendored: clickhouse-c
 
 - Source: https://github.com/ClickHouse/clickhouse-c
-- Commit: dd47d2882646aeba5a1946c62a229d57abea6c28 (cloned 2026-07-14)
+- Commit: 4bdd89a02438d1e81ba7cf95dc111af8a23e313b (updated 2026-08-11)
 - License: Apache-2.0 (see LICENSE)
 
 Only the headers the extension includes are vendored: `clickhouse.h`,
