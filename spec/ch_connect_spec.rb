@@ -197,6 +197,17 @@ RSpec.describe ChConnect do
 
         expect(response.rows).to eq([[BigDecimal("12345678901234567890.123456")]])
       end
+
+      it "parses negative decimals and a zero scale" do
+        response = connection.query(
+          "SELECT CAST('-1.005' AS Decimal64(3)), CAST('42' AS Decimal32(0)), CAST('-0.000001' AS Decimal256(6)), " \
+          "CAST('-12345678901234567890.12' AS Decimal128(2))"
+        )
+
+        expect(response.rows).to eq([[
+          BigDecimal("-1.005"), BigDecimal(42), BigDecimal("-0.000001"), BigDecimal("-12345678901234567890.12")
+        ]])
+      end
     end
 
     describe "UUID type" do

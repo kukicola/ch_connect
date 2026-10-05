@@ -16,6 +16,7 @@
 #include <ruby/encoding.h>
 #include <ruby/intern.h>
 
+#include <inttypes.h>
 #include <limits.h>
 #include <string.h>
 #include <time.h>
@@ -40,8 +41,7 @@ static VALUE vAF_INET6;
 
 static ID id_jd;
 static ID id_new;
-static ID id_pow;
-static ID id_div;
+static ID id_to_s;
 static ID id_BigDecimal;
 
 static VALUE sym_read_rows;
@@ -134,6 +134,39 @@ load_i64le(const uint8_t *p)
     int64_t v;
     memcpy(&v, &u, sizeof v);
     return v;
+}
+
+/* Little-endian two's complement value of 4..32 bytes as int64, when it fits. */
+static int
+load_decimal_i64(const uint8_t *p, size_t nbytes, int64_t *out)
+{
+    if (nbytes == 4) {
+        *out = load_i32le(p);
+        return 1;
+    }
+    int64_t v = load_i64le(p);
+    uint8_t sign = v < 0 ? 0xFF : 0x00;
+    for (size_t b = 8; b < nbytes; b++) {
+        if (p[b] != sign) return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+/* "<unscaled>e-<scale>" for a decimal value. BigDecimal parses it exactly,
+ * without the intermediate BigDecimals of dividing by 10**scale. Only values
+ * wider than 64 bits go through a Ruby Integer. */
+static VALUE
+decimal_literal(const uint8_t *p, size_t nbytes, int scale)
+{
+    int64_t v;
+    if (load_decimal_i64(p, nbytes, &v)) {
+        char buf[48];
+        int len = snprintf(buf, sizeof(buf), "%" PRId64 "e-%d", v, scale);
+        return rb_usascii_str_new(buf, len);
+    }
+    VALUE unscaled = rb_integer_unpack(p, nbytes, 1, 0, INTEGER_PACK_LITTLE_ENDIAN | INTEGER_PACK_2COMP);
+    return rb_str_catf(rb_funcall(unscaled, id_to_s, 0), "e-%d", scale);
 }
 
 static inline float
@@ -334,23 +367,9 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
     case CHC_DECIMAL128:
     case CHC_DECIMAL256: {
         int scale = chc_type_decimal_scale(t);
-        VALUE divisor = rb_funcall(INT2FIX(10), id_pow, 1, INT2FIX(scale));
+        size_t nbytes = kind == CHC_DECIMAL32 ? 4 : kind == CHC_DECIMAL64 ? 8 : kind == CHC_DECIMAL128 ? 16 : 32;
         for (long i = 0; i < n_rows; i++) {
-            VALUE unscaled;
-            if (kind == CHC_DECIMAL32) {
-                int32_t v = load_i32le(data + i * 4);
-                unscaled = INT2NUM(v);
-            } else if (kind == CHC_DECIMAL64) {
-                int64_t v = load_i64le(data + i * 8);
-                unscaled = LL2NUM(v);
-            } else {
-                size_t nbytes = (kind == CHC_DECIMAL128) ? 16 : 32;
-                unscaled = rb_integer_unpack(data + i * nbytes, nbytes, 1, 0,
-                                             INTEGER_PACK_LITTLE_ENDIAN |
-                                             INTEGER_PACK_2COMP);
-            }
-            VALUE bd = rb_funcall(rb_mKernel, id_BigDecimal, 1, unscaled);
-            rb_ary_push(ary, rb_funcall(bd, id_div, 1, divisor));
+            rb_ary_push(ary, rb_funcall(rb_mKernel, id_BigDecimal, 1, decimal_literal(data + i * nbytes, nbytes, scale)));
         }
         break;
     }
@@ -969,8 +988,7 @@ Init_ch_connect_native(void)
 
     id_jd = rb_intern("jd");
     id_new = rb_intern("new");
-    id_pow = rb_intern("**");
-    id_div = rb_intern("/");
+    id_to_s = rb_intern("to_s");
     id_BigDecimal = rb_intern("BigDecimal");
 
     sym_read_rows = ID2SYM(rb_intern("read_rows"));
