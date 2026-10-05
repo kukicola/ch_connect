@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Updated vendored clickhouse-c headers to `916cbf5`, adding sparse column decoding and requiring ClickHouse 23.3 or newer
 - Switched from HTTP to ClickHouse's native TCP protocol for faster queries and lower allocations
 - Added connection pooling, LZ4/ZSTD compression, TLS, and native ClickHouse URLs
 - Added native query parameters and per-query ClickHouse settings

@@ -52,7 +52,7 @@ Add the gem to your Gemfile:
 gem "ch_connect"
 ```
 
-The gem contains a native extension and currently requires MRI Ruby. LZ4 and ZSTD support are detected when the extension is built.
+The gem contains a native extension and requires MRI Ruby and ClickHouse 23.3 or newer. LZ4 and ZSTD support are detected when the extension is built.
 
 ## Configuration
 

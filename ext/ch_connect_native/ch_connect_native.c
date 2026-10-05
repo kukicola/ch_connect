@@ -714,7 +714,8 @@ native_client_handshake_step(VALUE self)
 
     nc->state = NATIVE_ACTIVE;
     chc_err err = {0};
-    int rc = chc_async_handshake(nc->ac, &err);
+    chc_exception *exception = NULL;
+    int rc = chc_async_handshake(nc->ac, &exception, &err);
     if (rc == CHC_OK) {
         nc->state = NATIVE_READY;
         return sym_done;
@@ -722,6 +723,16 @@ native_client_handshake_step(VALUE self)
     if (rc == CHC_WOULD_BLOCK) return sym_want_read;
 
     nc->state = NATIVE_BROKEN;
+    if (exception) {
+        /* Anchor the server exception before allocating Ruby objects so close
+         * or GC can still release it if message construction raises. */
+        nc->pending_pkt.kind = CHC_PKT_EXCEPTION;
+        nc->pending_pkt.exception = exception;
+        VALUE msg = rb_utf8_str_new(exception->display_text,
+                                    (long)exception->display_text_len);
+        clear_pending(nc);
+        rb_exc_raise(rb_exc_new_str(eConnectionError, msg));
+    }
     rb_raise(eConnectionError, "%s", err.msg);
 }
 
@@ -956,7 +967,7 @@ native_client_recv_step(VALUE self)
             nc->state = NATIVE_READY;
             return sym_done;
         }
-        /* PONG / TOTALS / EXTREMES / LOG / PROFILE_EVENTS — skip. */
+        /* PONG / TOTALS / EXTREMES / LOG / PROFILE_EVENTS / TIMEZONE_UPDATE — skip. */
     }
 }
 
