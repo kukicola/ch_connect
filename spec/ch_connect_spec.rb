@@ -208,6 +208,17 @@ RSpec.describe ChConnect do
           BigDecimal("-1.005"), BigDecimal(42), BigDecimal("-0.000001"), BigDecimal("-12345678901234567890.12")
         ]])
       end
+
+      it "parses wide decimals around the int64 boundary" do
+        response = connection.query(
+          "SELECT CAST('9223372036854775807' AS Decimal128(0)), CAST('9223372036854775808' AS Decimal128(0)), " \
+          "CAST('-9223372036854775808' AS Decimal256(0)), CAST('-9223372036854775809' AS Decimal256(0))"
+        )
+
+        expect(response.rows).to eq([[
+          BigDecimal(2**63 - 1), BigDecimal(2**63), BigDecimal(-2**63), BigDecimal(-2**63 - 1)
+        ]])
+      end
     end
 
     describe "UUID type" do

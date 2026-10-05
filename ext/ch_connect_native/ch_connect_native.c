@@ -41,7 +41,6 @@ static VALUE vAF_INET6;
 
 static ID id_jd;
 static ID id_new;
-static ID id_to_s;
 static ID id_BigDecimal;
 
 static VALUE sym_read_rows;
@@ -136,7 +135,7 @@ load_i64le(const uint8_t *p)
     return v;
 }
 
-/* Little-endian two's complement value of 4..32 bytes as int64, when it fits. */
+/* Little-endian two's complement value of 4, 8, 16 or 32 bytes as int64, when it fits. */
 static int
 load_decimal_i64(const uint8_t *p, size_t nbytes, int64_t *out)
 {
@@ -155,7 +154,7 @@ load_decimal_i64(const uint8_t *p, size_t nbytes, int64_t *out)
 
 /* "<unscaled>e-<scale>" for a decimal value. BigDecimal parses it exactly,
  * without the intermediate BigDecimals of dividing by 10**scale. Only values
- * wider than 64 bits go through a Ruby Integer. */
+ * outside the int64 range go through a Ruby Integer. */
 static VALUE
 decimal_literal(const uint8_t *p, size_t nbytes, int scale)
 {
@@ -166,7 +165,7 @@ decimal_literal(const uint8_t *p, size_t nbytes, int scale)
         return rb_usascii_str_new(buf, len);
     }
     VALUE unscaled = rb_integer_unpack(p, nbytes, 1, 0, INTEGER_PACK_LITTLE_ENDIAN | INTEGER_PACK_2COMP);
-    return rb_str_catf(rb_funcall(unscaled, id_to_s, 0), "e-%d", scale);
+    return rb_str_catf(rb_big2str(unscaled, 10), "e-%d", scale);
 }
 
 static inline float
@@ -988,7 +987,6 @@ Init_ch_connect_native(void)
 
     id_jd = rb_intern("jd");
     id_new = rb_intern("new");
-    id_to_s = rb_intern("to_s");
     id_BigDecimal = rb_intern("BigDecimal");
 
     sym_read_rows = ID2SYM(rb_intern("read_rows"));
