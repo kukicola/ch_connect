@@ -171,6 +171,20 @@ RSpec.describe ChConnect::Connection do
         connection.query("SELECT 1", settings: {network_compression_method: "zstd"})
       }.to raise_error(ArgumentError, /config\.compression/)
     end
+
+    it "uses ClickHouse's canonical compression method name" do
+      slot = instance_double(slot_class, broken?: false, close: nil)
+      allow(slot_class).to receive(:new).and_return(slot)
+      allow(slot).to receive(:query).and_return([[], [], [], {}])
+
+      connection.query("SELECT 1")
+
+      expect(slot).to have_received(:query).with(
+        "SELECT 1",
+        nil,
+        [["network_compression_method", "LZ4"]]
+      )
+    end
   end
 
   describe "summary" do
