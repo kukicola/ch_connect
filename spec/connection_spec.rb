@@ -69,7 +69,7 @@ RSpec.describe ChConnect::Connection do
       rejected_connection = described_class.new(rejected_config)
 
       expect { rejected_connection.query("SELECT 1") }
-        .to raise_error(ChConnect::ConnectionError)
+        .to raise_error(ChConnect::ConnectionError, /Authentication failed/)
     ensure
       rejected_connection&.close
     end
@@ -211,6 +211,109 @@ RSpec.describe ChConnect::Connection do
       }.to raise_error(ArgumentError, "unknown native compression")
     ensure
       client&.close
+    end
+  end
+
+  describe "native handshake" do
+    let(:client) { native_client_class.new("default", "default", "", nil) }
+
+    after { client.close }
+
+    def wire_varuint(value)
+      bytes = []
+      while value >= 128
+        bytes << ((value & 127) | 128)
+        value >>= 7
+      end
+      (bytes << value).pack("C*")
+    end
+
+    def wire_string(value)
+      wire_varuint(value.bytesize) + value.b
+    end
+
+    def wire_exception(message)
+      "\x02".b + [516].pack("l<") + wire_string("AUTHENTICATION_FAILED") +
+        wire_string(message) + wire_string("") + "\x00".b
+    end
+
+    it "preserves a long UTF-8 server error after fragmented input" do
+      message = "Authentication failed: #{"é" * 300} end"
+      packet = wire_exception(message)
+      expect(client.handshake_step).to eq(:want_read)
+      client.take_output
+
+      packet.bytes.each_slice(37).to_a.then do |chunks|
+        chunks[0...-1].each do |chunk|
+          client.feed(chunk.pack("C*"))
+          expect(client.handshake_step).to eq(:want_read)
+        end
+        client.feed(chunks.last.pack("C*"))
+      end
+
+      expect { client.handshake_step }
+        .to raise_error(ChConnect::ConnectionError, message)
+      expect(client).to be_broken
+      expect { client.handshake_step }
+        .to raise_error(ChConnect::ConnectionError, /broken state/)
+    end
+
+    it "preserves server errors during the post-hello ping" do
+      hello = "\x00".b + wire_string("ClickHouse") + wire_varuint(23) +
+        wire_varuint(3) + wire_varuint(54465) + wire_string("UTC") +
+        wire_string("localhost") + wire_varuint(1) + wire_varuint(0) + [0].pack("Q<")
+      expect(client.handshake_step).to eq(:want_read)
+      client.take_output
+      client.feed(hello)
+      expect(client.handshake_step).to eq(:want_read)
+      client.take_output
+
+      message = "Database missing does not exist"
+      client.feed(wire_exception(message))
+      expect { client.handshake_step }
+        .to raise_error(ChConnect::ConnectionError, message)
+      expect(client).to be_broken
+    end
+
+    it "rejects server revisions older than ClickHouse 23.3" do
+      hello = "\x00".b + wire_string("ClickHouse") + wire_varuint(23) +
+        wire_varuint(2) + wire_varuint(54461)
+      expect(client.handshake_step).to eq(:want_read)
+      client.take_output
+      client.feed(hello)
+
+      expect { client.handshake_step }
+        .to raise_error(ChConnect::ConnectionError, /server revision 54461 older than 54462/)
+      expect(client).to be_broken
+    end
+  end
+
+  describe "sparse columns" do
+    it "decodes default-heavy scalars and tuple children from MergeTree" do
+      table = "ch_connect_sparse_#{Process.pid}"
+      connection.query(<<~SQL)
+        CREATE TABLE #{table} (id UInt32, u UInt32, s String, t Tuple(a UInt64, b String))
+        ENGINE = MergeTree ORDER BY id
+        SETTINGS ratio_of_defaults_for_sparse_serialization = 0.5, min_bytes_for_wide_part = 0
+      SQL
+      connection.query(<<~SQL)
+        INSERT INTO #{table}
+        SELECT number, if(number % 97 = 0, number, 0),
+               if(number % 97 = 0, concat('v', toString(number)), ''),
+               tuple(if(number % 97 = 0, number, 0), '')
+        FROM numbers(1000)
+      SQL
+
+      response = connection.query("SELECT id, u, s, t FROM #{table}")
+      expected = 1000.times.map do |i|
+        value = (i % 97 == 0) ? i : 0
+        string = (i % 97 == 0) ? "v#{i}" : ""
+        [i, value, string, [value, ""]]
+      end
+      expect(response.rows).to match_array(expected)
+      expect(connection.query("SELECT 42").rows).to eq([[42]])
+    ensure
+      connection.query("DROP TABLE IF EXISTS #{table} SYNC")
     end
   end
 

@@ -47,8 +47,15 @@ int  chc_async_submit(chc_async_client *c, const void *buf, size_t len,
 void chc_async_pending_out(chc_async_client *c, const uint8_t **buf, size_t *len);
 void chc_async_consume_out(chc_async_client *c, size_t n);
 
-/* drive -- never block; CHC_WOULD_BLOCK = submit more / drain out */
-int  chc_async_handshake(chc_async_client *c, chc_err *err);
+/* Drive calls never block. CHC_WOULD_BLOCK requests more input or output
+ * draining
+ *
+ * Handshake rejection returns CHC_ERR_SERVER and leaves err->msg empty. When
+ * exc is not NULL, caller owns *exc and frees it with chc_exception_free.
+ * Other results leave *exc unchanged. Query exceptions still arrive as
+ * packets, but handshake rejection ends connection setup */
+int  chc_async_handshake(chc_async_client *c, chc_exception **exc,
+                         chc_err *err);
 int  chc_async_send_query(chc_async_client *c, const char *sql, size_t sql_len,
                           const char *query_id, size_t query_id_len, chc_err *err);
 int  chc_async_send_data(chc_async_client *c, const chc_block_builder *bb,
@@ -122,16 +129,7 @@ chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
     if (!c) return CHC_ERR_OOM;
 
     c->cli.al = al;
-    c->cli.client_version_major = opts->client_version_major;
-    c->cli.client_version_minor = opts->client_version_minor;
-    c->cli.client_version_patch = opts->client_version_patch;
-    c->cli.client_revision = opts->client_revision ? opts->client_revision
-                                                   : CHC_CLIENT_DEFAULT_REVISION;
-    c->cli.compression = opts->codec ? opts->compression : CHC_COMP_NONE;
-    c->cli.codec       = opts->codec;
-    /* Seed server.revision so block/packet framing is well-defined before the
-     * handshake completes; recv after handshake uses min(client, server). */
-    c->cli.server.revision = c->cli.client_revision;
+    chc__client_setup(&c->cli, opts);
 
     chc__mem_sink_init(&c->out, &c->out_io, al);
     c->cli.io = &c->out_io;
@@ -196,7 +194,7 @@ chc_async_consume_out(chc_async_client *c, size_t n)
 }
 
 int
-chc_async_handshake(chc_async_client *c, chc_err *err)
+chc_async_handshake(chc_async_client *c, chc_exception **exc, chc_err *err)
 {
     int rc;
     chc_client *cli = &c->cli;
@@ -209,7 +207,6 @@ chc_async_handshake(chc_async_client *c, chc_err *err)
                 .client_version_major = cli->client_version_major,
                 .client_version_minor = cli->client_version_minor,
                 .client_version_patch = cli->client_version_patch,
-                .client_revision = cli->client_revision,
                 .database = c->database,
                 .user = c->user,
                 .password = c->password,
@@ -222,27 +219,23 @@ chc_async_handshake(chc_async_client *c, chc_err *err)
 
         case CHC__HS_RECV_HELLO:
             chc__in_checkpoint(&cli->in);
-            rc = chc__client_recv_hello(cli, err);
+            rc = chc__client_recv_hello(cli, exc, err);
             if (rc == CHC_WOULD_BLOCK) { chc__in_rewind(&cli->in); return rc; }
             if (rc != CHC_OK) return rc;  /* server exception / protocol */
             chc_in_reset(&cli->in);
-            if (cli->server.revision > cli->client_revision)
-                cli->server.revision = cli->client_revision;
             c->hs_phase = CHC__HS_POST_HELLO;
             continue;
 
         case CHC__HS_POST_HELLO:
-            if (cli->server.revision >= CHC__REV_ADDENDUM) {
-                rc = chc__write_string(cli->io, "", 0, err);  /* quota_key */
-                if (rc != CHC_OK) return rc;
-            }
+            rc = chc__write_string(cli->io, "", 0, err);  /* quota_key */
+            if (rc != CHC_OK) return rc;
             rc = chc_client_send_ping(cli, err);
             if (rc != CHC_OK) return rc;
             c->hs_phase = CHC__HS_RECV_PONG;
             continue;
 
         case CHC__HS_RECV_PONG:
-            rc = chc__recv_pong(cli, err);  /* owns checkpoint/rewind */
+            rc = chc__recv_pong(cli, exc, err);  /* owns checkpoint/rewind */
             if (rc != CHC_OK) return rc;
             chc_in_reset(&cli->in);
             c->hs_phase = CHC__HS_DONE;

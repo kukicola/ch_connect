@@ -1,3 +1,7 @@
+## Unreleased
+
+- Updated vendored clickhouse-c headers to `916cbf5`, adding sparse column decoding and requiring ClickHouse 23.3 or newer
+
 ## [0.3.1] - 2026-08-19
 
 - Fixed LZ4 compression negotiation for ClickHouse users configured with `readonly = 1`
