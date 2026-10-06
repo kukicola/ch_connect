@@ -1,6 +1,12 @@
 ## Unreleased
 
-- Updated vendored clickhouse-c headers to `916cbf5`, adding sparse column decoding and requiring ClickHouse 23.3 or newer
+## [0.4.0] - 2026-10-06
+
+- Raised the minimum supported ClickHouse version to 23.3; connections to older servers are rejected during the handshake
+- Updated vendored clickhouse-c headers to `916cbf5`, adding sparse column decoding
+- Improved decimal decoding performance while preserving exact values across all decimal widths
+- Fixed decoding of geometry types, including Point, Ring, Polygon, MultiPolygon, LineString, and MultiLineString
+- Preserved complete UTF-8 server error messages during connection establishment
 
 ## [0.3.1] - 2026-08-19
 
