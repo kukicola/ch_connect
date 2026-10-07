@@ -273,6 +273,12 @@ RSpec.describe ChConnect do
 
         expect(response.rows).to eq([[[]]])
       end
+
+      it "keeps columns aligned after multiple empty Tuple rows" do
+        response = connection.query("SELECT tuple(), number, tuple() FROM numbers(300)")
+
+        expect(response.rows).to eq(300.times.map { |i| [[], i, []] })
+      end
     end
 
     describe "map type" do

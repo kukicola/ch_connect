@@ -1,7 +1,8 @@
 # Vendored: clickhouse-c
 
 - Source: https://github.com/ClickHouse/clickhouse-c
-- Commit: dd47d2882646aeba5a1946c62a229d57abea6c28 (cloned 2026-07-14)
+- Commit: b7a6fbb14945a31a5c0b276ef27998c82982e274 (updated 2026-10-07;
+  upstream commit, not a release/tag)
 - License: Apache-2.0 (see LICENSE)
 
 Only the headers the extension includes are vendored: `clickhouse.h`,
@@ -22,3 +23,7 @@ ioless (Ruby owns the socket and TLS).
 Clone the pinned or newer commit, copy the four headers + LICENSE over this
 directory, re-apply the patches above (or drop them once fixed upstream), and
 run the full spec suite with `CH_TRANSPORT=native`.
+
+The allocation-failure regression in `spec/vendor_alloc_spec.rb` compiles a
+small C harness with Ruby's configured compiler. Also run StandardRB, rebuild
+the extension and gem, and include the TLS integration specs when updating.

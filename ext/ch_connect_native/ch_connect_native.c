@@ -638,7 +638,8 @@ native_client_handshake_step(VALUE self)
 
     nc->state = NATIVE_ACTIVE;
     chc_err err = {0};
-    int rc = chc_async_handshake(nc->ac, &err);
+    chc_exception *exc = NULL;
+    int rc = chc_async_handshake(nc->ac, &exc, &err);
     if (rc == CHC_OK) {
         nc->state = NATIVE_READY;
         return sym_done;
@@ -646,6 +647,16 @@ native_client_handshake_step(VALUE self)
     if (rc == CHC_WOULD_BLOCK) return sym_want_read;
 
     nc->state = NATIVE_BROKEN;
+    if (rc == CHC_ERR_SERVER && exc) {
+        /* Park ownership before allocating Ruby objects, as for query errors. */
+        nc->pending_pkt.kind = CHC_PKT_EXCEPTION;
+        nc->pending_pkt.exception = exc;
+        const char *text = exc->display_text ? exc->display_text : exc->name;
+        size_t len = exc->display_text ? exc->display_text_len : exc->name_len;
+        VALUE msg = rb_utf8_str_new(text ? text : "", (long)len);
+        clear_pending(nc);
+        rb_exc_raise(rb_exc_new_str(eConnectionError, msg));
+    }
     rb_raise(eConnectionError, "%s", err.msg);
 }
 

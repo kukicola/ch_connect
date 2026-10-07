@@ -10,6 +10,51 @@ RSpec.describe ChConnect::Connection do
 
   after { @connection&.close }
 
+  describe "native handshake exceptions" do
+    let(:client) { native_client_class.new("default", "default", "", nil) }
+    let(:varuint) do
+      lambda do |value|
+        bytes = []
+        loop do
+          byte = value & 0x7f
+          value >>= 7
+          bytes << (value.zero? ? byte : byte | 0x80)
+          break if value.zero?
+        end
+        bytes.pack("C*")
+      end
+    end
+    let(:wire_string) { ->(value) { varuint.call(value.bytesize) + value } }
+    let(:message) { "authentication detail " * 100 + "final diagnostic" }
+    let(:exception) do
+      varuint.call(2) + [516].pack("l<") + wire_string.call("DB::Exception") +
+        wire_string.call(message) + wire_string.call("") + "\0"
+    end
+
+    after { client.close }
+
+    [false, true].each do |after_hello|
+      it "preserves a fragmented rejection #{after_hello ? "after Hello" : "instead of Hello"}" do
+        expect(client.handshake_step).to eq(:want_read)
+        client.take_output
+        if after_hello
+          hello = varuint.call(0) + wire_string.call("ClickHouse") +
+            varuint.call(26) + varuint.call(7) + varuint.call(54459) +
+            wire_string.call("UTC") + wire_string.call("test") + varuint.call(1)
+          client.feed(hello)
+          expect(client.handshake_step).to eq(:want_read)
+          client.take_output
+        end
+        client.feed(exception.byteslice(0, 100))
+        expect(client.handshake_step).to eq(:want_read)
+        client.feed(exception.byteslice(100..))
+
+        expect { client.handshake_step }
+          .to raise_error(ChConnect::ConnectionError, message)
+      end
+    end
+  end
+
   describe "#initialize" do
     it "captures an immutable configuration snapshot" do
       original_database = config.database
