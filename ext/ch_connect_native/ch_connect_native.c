@@ -388,8 +388,10 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
     return ary;
 }
 
+/* null_map (optional) marks rows that a Nullable wrapper turns into nil, so
+ * their placeholder strings are never allocated. */
 static VALUE
-decode_string_column(const chc_column *col, long n_rows)
+decode_string_column(const chc_column *col, long n_rows, const uint8_t *null_map)
 {
     const uint8_t *data = chc_column_string_data(col);
     const uint64_t *offsets = chc_column_string_offsets(col);
@@ -398,7 +400,8 @@ decode_string_column(const chc_column *col, long n_rows)
     uint64_t start = 0;
     for (long i = 0; i < n_rows; i++) {
         uint64_t end = offsets[i];
-        rb_ary_push(ary, rb_utf8_str_new((const char *)data + start, (long)(end - start)));
+        if (null_map && null_map[i] == 1) rb_ary_push(ary, Qnil);
+        else rb_ary_push(ary, rb_utf8_str_new((const char *)data + start, (long)(end - start)));
         start = end;
     }
     return ary;
@@ -501,12 +504,14 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
         return decode_fixed(col, t, n_rows, state);
 
     case CHC_COL_STRING:
-        return decode_string_column(col, n_rows);
+        return decode_string_column(col, n_rows, NULL);
 
     case CHC_COL_NULLABLE: {
         const uint8_t *null_map = chc_column_null_map(col);
         const chc_column *inner = chc_column_nullable_inner(col);
         const chc_type *inner_t = chc_type_child(t, 0);
+        if (chc_column_layout(inner) == CHC_COL_STRING)
+            return decode_string_column(inner, n_rows, null_map);
         VALUE vals = decode_column(inner, inner_t, n_rows, state);
         for (long i = 0; i < n_rows; i++) {
             if (null_map[i] == 1) rb_ary_store(vals, i, Qnil);

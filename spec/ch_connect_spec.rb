@@ -408,6 +408,15 @@ RSpec.describe ChConnect do
 
         expect(response.rows).to eq([["hello", nil]])
       end
+
+      it "parses nullable string columns mixing nulls and empty strings" do
+        response = connection.query(<<~SQL)
+          SELECT multiIf(number % 3 = 0, NULL, number % 3 = 1, '', toString(number))::Nullable(String)
+          FROM system.numbers LIMIT 9
+        SQL
+
+        expect(response.rows.flatten).to eq([nil, "", "2", nil, "", "5", nil, "", "8"])
+      end
     end
 
     describe "multiple rows" do
