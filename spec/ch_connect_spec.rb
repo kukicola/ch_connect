@@ -153,6 +153,17 @@ RSpec.describe ChConnect do
         expect(response.rows).to eq([[Date.new(1900, 1, 1), Date.new(2024, 1, 1)]])
       end
 
+      it "parses repeated and colliding dates" do
+        response = connection.query(<<~SQL)
+          SELECT toDate('2024-01-01') + (number % 3) * 256, toDate32('1960-01-01') - (number % 3) * 256
+          FROM system.numbers LIMIT 9
+        SQL
+
+        expect(response.rows).to eq(9.times.map { |i|
+          [Date.new(2024, 1, 1) + (i % 3) * 256, Date.new(1960, 1, 1) - (i % 3) * 256]
+        })
+      end
+
       it "parses DateTime" do
         response = connection.query("SELECT toDateTime('2024-01-01 12:30:45', 'UTC')")
 

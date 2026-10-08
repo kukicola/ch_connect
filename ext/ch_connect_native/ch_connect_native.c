@@ -58,6 +58,9 @@ static VALUE sym_zstd;
 /* Julian day number of 1970-01-01 (Date.jd(2440588) == Date.new(1970, 1, 1)) */
 #define UNIX_EPOCH_JD 2440588
 
+/* Per-column Date cache slots; must be a power of two */
+#define DATE_CACHE_SIZE 256
+
 /* One immutable codec shared by all connections and threads: the built-in
  * adapters are stateless wrappers over the one-shot lz4/zstd functions. Both
  * slot pairs are filled (when available) so decode survives a server-side
@@ -291,17 +294,23 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
         }
         break;
     }
-    case CHC_DATE: {
-        for (long i = 0; i < n_rows; i++) {
-            uint16_t days = load_u16le(data + i * 2);
-            rb_ary_push(ary, rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + (long)days)));
-        }
-        break;
-    }
+    case CHC_DATE:
     case CHC_DATE32: {
+        /* Date construction is a Ruby method call and columns usually repeat
+         * a handful of days, so reuse (immutable) Dates through a small
+         * direct-mapped cache. Every cached Date is already anchored by ary. */
+        long cache_days[DATE_CACHE_SIZE];
+        VALUE cache_vals[DATE_CACHE_SIZE];
+        for (int k = 0; k < DATE_CACHE_SIZE; k++) cache_vals[k] = Qundef;
         for (long i = 0; i < n_rows; i++) {
-            int32_t days = load_i32le(data + i * 4);
-            rb_ary_push(ary, rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + (long)days)));
+            long days = kind == CHC_DATE ? (long)load_u16le(data + i * 2)
+                                         : (long)load_i32le(data + i * 4);
+            unsigned long slot = (unsigned long)days & (DATE_CACHE_SIZE - 1);
+            if (cache_vals[slot] == Qundef || cache_days[slot] != days) {
+                cache_days[slot] = days;
+                cache_vals[slot] = rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + days));
+            }
+            rb_ary_push(ary, cache_vals[slot]);
         }
         break;
     }
