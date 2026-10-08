@@ -913,13 +913,16 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
                                 (long)n_rows, &nc->state);
         rb_ary_push(col_vals, cols[i]);
     }
+    /* row_vals only holds references that cols[] already anchors */
+    VALUE row_buf;
+    VALUE *row_vals = ALLOCV_N(VALUE, row_buf, n_cols);
     for (size_t r = 0; r < n_rows; r++) {
-        VALUE row = rb_ary_new_capa((long)n_cols);
         for (size_t c = 0; c < n_cols; c++) {
-            rb_ary_push(row, RARRAY_AREF(cols[c], (long)r));
+            row_vals[c] = RARRAY_AREF(cols[c], (long)r);
         }
-        rb_ary_push(rows, row);
+        rb_ary_push(rows, rb_ary_new_from_values((long)n_cols, row_vals));
     }
+    ALLOCV_END(row_buf);
     ALLOCV_END(cols_buf);
     RB_GC_GUARD(col_vals);
 }
