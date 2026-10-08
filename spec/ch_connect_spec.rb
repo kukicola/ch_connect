@@ -359,6 +359,16 @@ RSpec.describe ChConnect do
         expect(response.rows).to eq([[{"a" => 1, "b" => 2}]])
       end
 
+      it "parses Map across rows with UTF-8 and non-String keys" do
+        response = connection.query(<<~SQL)
+          SELECT map('zażółć', number, 'k', number + 1), map(number, 'v')
+          FROM system.numbers LIMIT 3
+        SQL
+
+        expect(response.rows).to eq(3.times.map { |i| [{"zażółć" => i, "k" => i + 1}, {i => "v"}] })
+        expect(response.rows.first.first.keys.map(&:encoding)).to all(eq(Encoding::UTF_8))
+      end
+
       it "parses empty Map" do
         response = connection.query("SELECT map()::Map(String, UInt8)")
 

@@ -412,6 +412,23 @@ decode_string_column(const chc_column *col, long n_rows, const uint8_t *null_map
     return ary;
 }
 
+static VALUE
+decode_interned_string_column(const chc_column *col, long n_rows)
+{
+    const uint8_t *data = chc_column_string_data(col);
+    const uint64_t *offsets = chc_column_string_offsets(col);
+    rb_encoding *utf8 = rb_utf8_encoding();
+    VALUE ary = rb_ary_new_capa(n_rows);
+
+    uint64_t start = 0;
+    for (long i = 0; i < n_rows; i++) {
+        uint64_t end = offsets[i];
+        rb_ary_push(ary, rb_enc_interned_str((const char *)data + start, (long)(end - start), utf8));
+        start = end;
+    }
+    return ary;
+}
+
 static void
 raise_invalid_geometry(native_state *state, const char *detail)
 {
@@ -535,7 +552,12 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
             long total = (long)chc_column_n_rows(values_col);
             const chc_column *keys_col = chc_column_tuple_child(values_col, 0);
             const chc_column *vals_col = chc_column_tuple_child(values_col, 1);
-            VALUE keys = decode_column(keys_col, kt, total, state);
+            /* Hash#[]= dups and freezes unfrozen String keys; decoding them
+             * as interned (frozen, deduplicated) strings skips that copy, and
+             * map keys typically repeat across rows. */
+            VALUE keys = chc_column_layout(keys_col) == CHC_COL_STRING
+                ? decode_interned_string_column(keys_col, total)
+                : decode_column(keys_col, kt, total, state);
             VALUE vals = decode_column(vals_col, vt, total, state);
 
             VALUE ary = rb_ary_new_capa(n_rows);
@@ -548,7 +570,7 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
                              "Map offset out of bounds at row %ld: %llu", i,
                              (unsigned long long)end);
                 }
-                VALUE hash = rb_hash_new();
+                VALUE hash = rb_hash_new_capa((long)(end - start));
                 for (uint64_t j = start; j < end; j++) {
                     rb_hash_aset(hash, RARRAY_AREF(keys, (long)j), RARRAY_AREF(vals, (long)j));
                 }
