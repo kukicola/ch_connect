@@ -58,6 +58,9 @@ static VALUE sym_zstd;
 /* Julian day number of 1970-01-01 (Date.jd(2440588) == Date.new(1970, 1, 1)) */
 #define UNIX_EPOCH_JD 2440588
 
+/* Per-column Date cache slots; must be a power of two */
+#define DATE_CACHE_SIZE 256
+
 /* One immutable codec shared by all connections and threads: the built-in
  * adapters are stateless wrappers over the one-shot lz4/zstd functions. Both
  * slot pairs are filled (when available) so decode survives a server-side
@@ -291,17 +294,23 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
         }
         break;
     }
-    case CHC_DATE: {
-        for (long i = 0; i < n_rows; i++) {
-            uint16_t days = load_u16le(data + i * 2);
-            rb_ary_push(ary, rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + (long)days)));
-        }
-        break;
-    }
+    case CHC_DATE:
     case CHC_DATE32: {
+        /* Date construction is a Ruby method call and columns usually repeat
+         * a handful of days, so reuse (immutable) Dates through a small
+         * direct-mapped cache. Every cached Date is already anchored by ary. */
+        long cache_days[DATE_CACHE_SIZE];
+        VALUE cache_vals[DATE_CACHE_SIZE];
+        for (int k = 0; k < DATE_CACHE_SIZE; k++) cache_vals[k] = Qundef;
         for (long i = 0; i < n_rows; i++) {
-            int32_t days = load_i32le(data + i * 4);
-            rb_ary_push(ary, rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + (long)days)));
+            long days = kind == CHC_DATE ? (long)load_u16le(data + i * 2)
+                                         : (long)load_i32le(data + i * 4);
+            unsigned long slot = (unsigned long)days & (DATE_CACHE_SIZE - 1);
+            if (cache_vals[slot] == Qundef || cache_days[slot] != days) {
+                cache_days[slot] = days;
+                cache_vals[slot] = rb_funcall(cDate, id_jd, 1, LONG2NUM(UNIX_EPOCH_JD + days));
+            }
+            rb_ary_push(ary, cache_vals[slot]);
         }
         break;
     }
@@ -331,18 +340,23 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
         break;
     }
     case CHC_UUID: {
-        char buf[37];
+        /* Each 8-byte half is little-endian on the wire; emit both halves
+         * most significant nibble first, with dashes after hex digits
+         * 8, 12, 16 and 20. */
+        static const char hex[] = "0123456789abcdef";
         for (long i = 0; i < n_rows; i++) {
             const uint8_t *p = data + i * 16;
-            uint64_t hi = load_u64le(p);
-            uint64_t lo = load_u64le(p + 8);
-            snprintf(buf, sizeof(buf), "%08llx-%04llx-%04llx-%04llx-%012llx",
-                     (unsigned long long)(hi >> 32),
-                     (unsigned long long)((hi >> 16) & 0xFFFF),
-                     (unsigned long long)(hi & 0xFFFF),
-                     (unsigned long long)(lo >> 48),
-                     (unsigned long long)(lo & 0xFFFFFFFFFFFFULL));
-            rb_ary_push(ary, rb_utf8_str_new(buf, 36));
+            uint64_t halves[2] = { load_u64le(p), load_u64le(p + 8) };
+            VALUE str = rb_utf8_str_new(NULL, 36);
+            char *out = RSTRING_PTR(str);
+            int o = 0;
+            for (int h = 0; h < 2; h++) {
+                for (int shift = 60; shift >= 0; shift -= 4) {
+                    if (o == 8 || o == 13 || o == 18 || o == 23) out[o++] = '-';
+                    out[o++] = hex[(halves[h] >> shift) & 0xF];
+                }
+            }
+            rb_ary_push(ary, str);
         }
         break;
     }
@@ -379,8 +393,10 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
     return ary;
 }
 
+/* null_map (optional) marks rows that a Nullable wrapper turns into nil, so
+ * their placeholder strings are never allocated. */
 static VALUE
-decode_string_column(const chc_column *col, long n_rows)
+decode_string_column(const chc_column *col, long n_rows, const uint8_t *null_map)
 {
     const uint8_t *data = chc_column_string_data(col);
     const uint64_t *offsets = chc_column_string_offsets(col);
@@ -389,7 +405,25 @@ decode_string_column(const chc_column *col, long n_rows)
     uint64_t start = 0;
     for (long i = 0; i < n_rows; i++) {
         uint64_t end = offsets[i];
-        rb_ary_push(ary, rb_utf8_str_new((const char *)data + start, (long)(end - start)));
+        if (null_map && null_map[i] == 1) rb_ary_push(ary, Qnil);
+        else rb_ary_push(ary, rb_utf8_str_new((const char *)data + start, (long)(end - start)));
+        start = end;
+    }
+    return ary;
+}
+
+static VALUE
+decode_interned_string_column(const chc_column *col, long n_rows)
+{
+    const uint8_t *data = chc_column_string_data(col);
+    const uint64_t *offsets = chc_column_string_offsets(col);
+    rb_encoding *utf8 = rb_utf8_encoding();
+    VALUE ary = rb_ary_new_capa(n_rows);
+
+    uint64_t start = 0;
+    for (long i = 0; i < n_rows; i++) {
+        uint64_t end = offsets[i];
+        rb_ary_push(ary, rb_enc_interned_str((const char *)data + start, (long)(end - start), utf8));
         start = end;
     }
     return ary;
@@ -492,12 +526,14 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
         return decode_fixed(col, t, n_rows, state);
 
     case CHC_COL_STRING:
-        return decode_string_column(col, n_rows);
+        return decode_string_column(col, n_rows, NULL);
 
     case CHC_COL_NULLABLE: {
         const uint8_t *null_map = chc_column_null_map(col);
         const chc_column *inner = chc_column_nullable_inner(col);
         const chc_type *inner_t = chc_type_child(t, 0);
+        if (chc_column_layout(inner) == CHC_COL_STRING)
+            return decode_string_column(inner, n_rows, null_map);
         VALUE vals = decode_column(inner, inner_t, n_rows, state);
         for (long i = 0; i < n_rows; i++) {
             if (null_map[i] == 1) rb_ary_store(vals, i, Qnil);
@@ -516,7 +552,12 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
             long total = (long)chc_column_n_rows(values_col);
             const chc_column *keys_col = chc_column_tuple_child(values_col, 0);
             const chc_column *vals_col = chc_column_tuple_child(values_col, 1);
-            VALUE keys = decode_column(keys_col, kt, total, state);
+            /* Hash#[]= dups and freezes unfrozen String keys; decoding them
+             * as interned (frozen, deduplicated) strings skips that copy, and
+             * map keys typically repeat across rows. */
+            VALUE keys = chc_column_layout(keys_col) == CHC_COL_STRING
+                ? decode_interned_string_column(keys_col, total)
+                : decode_column(keys_col, kt, total, state);
             VALUE vals = decode_column(vals_col, vt, total, state);
 
             VALUE ary = rb_ary_new_capa(n_rows);
@@ -529,7 +570,7 @@ decode_column(const chc_column *col, const chc_type *t, long n_rows, native_stat
                              "Map offset out of bounds at row %ld: %llu", i,
                              (unsigned long long)end);
                 }
-                VALUE hash = rb_hash_new();
+                VALUE hash = rb_hash_new_capa((long)(end - start));
                 for (uint64_t j = start; j < end; j++) {
                     rb_hash_aset(hash, RARRAY_AREF(keys, (long)j), RARRAY_AREF(vals, (long)j));
                 }
@@ -913,13 +954,16 @@ native_client_decode_block(VALUE self, native_client_t *nc, chc_block *block)
                                 (long)n_rows, &nc->state);
         rb_ary_push(col_vals, cols[i]);
     }
+    /* row_vals only holds references that cols[] already anchors */
+    VALUE row_buf;
+    VALUE *row_vals = ALLOCV_N(VALUE, row_buf, n_cols);
     for (size_t r = 0; r < n_rows; r++) {
-        VALUE row = rb_ary_new_capa((long)n_cols);
         for (size_t c = 0; c < n_cols; c++) {
-            rb_ary_push(row, RARRAY_AREF(cols[c], (long)r));
+            row_vals[c] = RARRAY_AREF(cols[c], (long)r);
         }
-        rb_ary_push(rows, row);
+        rb_ary_push(rows, rb_ary_new_from_values((long)n_cols, row_vals));
     }
+    ALLOCV_END(row_buf);
     ALLOCV_END(cols_buf);
     RB_GC_GUARD(col_vals);
 }

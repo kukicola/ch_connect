@@ -166,6 +166,17 @@ RSpec.describe ChConnect::Connection do
       expect(rows_with(:zstd)).to eq(plain) if native_client_class.const_get(:ZSTD_AVAILABLE, false)
     end
 
+    it "decodes uncompressed blocks that span many socket reads" do
+      plain = described_class.new(config.dup.tap { |c| c.compression = nil })
+      rows = plain.query("SELECT number, repeat('x', 100) || toString(number) AS s FROM system.numbers LIMIT 200000").rows
+
+      expect(rows.size).to eq(200_000)
+      expect(rows.first).to eq([0, "#{"x" * 100}0"])
+      expect(rows.last).to eq([199_999, "#{"x" * 100}199999"])
+    ensure
+      plain&.close
+    end
+
     it "keeps compression configuration authoritative" do
       expect {
         connection.query("SELECT 1", settings: {network_compression_method: "zstd"})
