@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Improved large result decoding speed (about 1.9x faster for the 100K-row benchmark query) and reduced its allocations from 97 MB to 55 MB
+- Fixed quadratic re-parsing of large uncompressed result blocks (about 5x faster for multi-megabyte String columns)
+- Faster decoding of repeated `Date`/`Date32` values, `Nullable(String)`, `UUID`, and `Map` with String keys, and faster `Response#each`
+
 ## [0.4.0] - 2026-10-06
 
 - Raised the minimum supported ClickHouse version to 23.3; connections to older servers are rejected during the handshake
