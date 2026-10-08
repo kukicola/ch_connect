@@ -340,18 +340,23 @@ decode_fixed(const chc_column *col, const chc_type *t, long n_rows, native_state
         break;
     }
     case CHC_UUID: {
-        char buf[37];
+        /* Each 8-byte half is little-endian on the wire; emit both halves
+         * most significant nibble first, with dashes after hex digits
+         * 8, 12, 16 and 20. */
+        static const char hex[] = "0123456789abcdef";
         for (long i = 0; i < n_rows; i++) {
             const uint8_t *p = data + i * 16;
-            uint64_t hi = load_u64le(p);
-            uint64_t lo = load_u64le(p + 8);
-            snprintf(buf, sizeof(buf), "%08llx-%04llx-%04llx-%04llx-%012llx",
-                     (unsigned long long)(hi >> 32),
-                     (unsigned long long)((hi >> 16) & 0xFFFF),
-                     (unsigned long long)(hi & 0xFFFF),
-                     (unsigned long long)(lo >> 48),
-                     (unsigned long long)(lo & 0xFFFFFFFFFFFFULL));
-            rb_ary_push(ary, rb_utf8_str_new(buf, 36));
+            uint64_t halves[2] = { load_u64le(p), load_u64le(p + 8) };
+            VALUE str = rb_utf8_str_new(NULL, 36);
+            char *out = RSTRING_PTR(str);
+            int o = 0;
+            for (int h = 0; h < 2; h++) {
+                for (int shift = 60; shift >= 0; shift -= 4) {
+                    if (o == 8 || o == 13 || o == 18 || o == 23) out[o++] = '-';
+                    out[o++] = hex[(halves[h] >> shift) & 0xF];
+                }
+            }
+            rb_ary_push(ary, str);
         }
         break;
     }

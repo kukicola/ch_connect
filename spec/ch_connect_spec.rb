@@ -238,6 +238,24 @@ RSpec.describe ChConnect do
 
         expect(response.rows).to eq([["550e8400-e29b-41d4-a716-446655440000"]])
       end
+
+      it "parses UUIDs at the edges of the value range" do
+        uuids = %w[
+          00000000-0000-0000-0000-000000000000
+          00000000-0000-0000-0000-000000000001
+          80000000-0000-0000-8000-000000000000
+          ffffffff-ffff-ffff-ffff-ffffffffffff
+        ]
+        response = connection.query("SELECT toUUID(arrayJoin([#{uuids.map { |u| "'#{u}'" }.join(", ")}]))")
+
+        expect(response.rows.flatten).to eq(uuids)
+      end
+
+      it "matches the server's UUID text form" do
+        response = connection.query("SELECT generateUUIDv4() AS u, toString(u) FROM system.numbers LIMIT 1000")
+
+        expect(response.rows.map(&:first)).to eq(response.rows.map(&:last))
+      end
     end
 
     describe "IP address types" do
