@@ -1,4 +1,4 @@
-## Unreleased
+## [0.4.1] - 2026-10-12
 
 - Improved large result decoding speed (about 1.9x faster for the 100K-row benchmark query) and reduced its allocations from 97 MB to 55 MB
 - Fixed quadratic re-parsing of large uncompressed result blocks (about 5x faster for multi-megabyte String columns)
