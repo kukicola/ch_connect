@@ -27,6 +27,7 @@ module ChConnect
 
     READ_CHUNK = 64 * 1024
     WRITE_CHUNK = 64 * 1024
+    DRAIN_LIMIT = 16 * 1024 * 1024
     PARAM_ESCAPES = {
       "\0" => "\\0", "\a" => "\\a", "\b" => "\\b", "\e" => "\\e",
       "\f" => "\\f", "\n" => "\\n", "\r" => "\\r", "\t" => "\\t",
@@ -60,7 +61,7 @@ module ChConnect
         loop do
           case @client.recv_step
           when :done then break
-          when :want_read then @client.feed(read_chunk)
+          when :want_read then feed_available
           end
         end
         @client.take_result
@@ -188,6 +189,23 @@ module ChConnect
               offset += written
             end
           end
+        end
+      end
+
+      # Blocks for one chunk, then drains whatever else the socket already has
+      # buffered (up to DRAIN_LIMIT). An uncompressed Data block that ends
+      # mid-column is re-parsed from that column's start on the next
+      # recv_step, so retrying once per burst instead of once per chunk keeps
+      # large blocks from going quadratic.
+      def feed_available
+        @client.feed(read_chunk)
+        drained = 0
+        while drained < DRAIN_LIMIT
+          chunk = @socket.read_nonblock(READ_CHUNK, @read_buf, exception: false)
+          break unless chunk.is_a?(String)
+
+          @client.feed(chunk)
+          drained += chunk.bytesize
         end
       end
 

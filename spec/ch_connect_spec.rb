@@ -153,6 +153,17 @@ RSpec.describe ChConnect do
         expect(response.rows).to eq([[Date.new(1900, 1, 1), Date.new(2024, 1, 1)]])
       end
 
+      it "parses repeated and colliding dates" do
+        response = connection.query(<<~SQL)
+          SELECT toDate('2024-01-01') + (number % 3) * 256, toDate32('1960-01-01') - (number % 3) * 256
+          FROM system.numbers LIMIT 9
+        SQL
+
+        expect(response.rows).to eq(9.times.map { |i|
+          [Date.new(2024, 1, 1) + (i % 3) * 256, Date.new(1960, 1, 1) - (i % 3) * 256]
+        })
+      end
+
       it "parses DateTime" do
         response = connection.query("SELECT toDateTime('2024-01-01 12:30:45', 'UTC')")
 
@@ -226,6 +237,24 @@ RSpec.describe ChConnect do
         response = connection.query("SELECT toUUID('550e8400-e29b-41d4-a716-446655440000')")
 
         expect(response.rows).to eq([["550e8400-e29b-41d4-a716-446655440000"]])
+      end
+
+      it "parses UUIDs at the edges of the value range" do
+        uuids = %w[
+          00000000-0000-0000-0000-000000000000
+          00000000-0000-0000-0000-000000000001
+          80000000-0000-0000-8000-000000000000
+          ffffffff-ffff-ffff-ffff-ffffffffffff
+        ]
+        response = connection.query("SELECT toUUID(arrayJoin([#{uuids.map { |u| "'#{u}'" }.join(", ")}]))")
+
+        expect(response.rows.flatten).to eq(uuids)
+      end
+
+      it "matches the server's UUID text form" do
+        response = connection.query("SELECT generateUUIDv4() AS u, toString(u) FROM system.numbers LIMIT 1000")
+
+        expect(response.rows.map(&:first)).to eq(response.rows.map(&:last))
       end
     end
 
@@ -330,6 +359,16 @@ RSpec.describe ChConnect do
         expect(response.rows).to eq([[{"a" => 1, "b" => 2}]])
       end
 
+      it "parses Map across rows with UTF-8 and non-String keys" do
+        response = connection.query(<<~SQL)
+          SELECT map('zażółć', number, 'k', number + 1), map(number, 'v')
+          FROM system.numbers LIMIT 3
+        SQL
+
+        expect(response.rows).to eq(3.times.map { |i| [{"zażółć" => i, "k" => i + 1}, {i => "v"}] })
+        expect(response.rows.first.first.keys.map(&:encoding)).to all(eq(Encoding::UTF_8))
+      end
+
       it "parses empty Map" do
         response = connection.query("SELECT map()::Map(String, UInt8)")
 
@@ -396,6 +435,15 @@ RSpec.describe ChConnect do
         response = connection.query("SELECT CAST('hello' AS Nullable(String)), CAST(NULL AS Nullable(String))")
 
         expect(response.rows).to eq([["hello", nil]])
+      end
+
+      it "parses nullable string columns mixing nulls and empty strings" do
+        response = connection.query(<<~SQL)
+          SELECT multiIf(number % 3 = 0, NULL, number % 3 = 1, '', toString(number))::Nullable(String)
+          FROM system.numbers LIMIT 9
+        SQL
+
+        expect(response.rows.flatten).to eq([nil, "", "2", nil, "", "5", nil, "", "8"])
       end
     end
 
