@@ -1,7 +1,7 @@
 # Vendored: clickhouse-c
 
 - Source: https://github.com/ClickHouse/clickhouse-c
-- Commit: 916cbf5ff41a218978bc073bca10f5b609a00081 (updated 2026-10-05)
+- Commit: 26438645d107b434569941928747ac68c470e6bf (updated 2026-11-25)
 - License: Apache-2.0 (see LICENSE)
 
 The native client requires ClickHouse 23.3 or newer and advertises protocol

@@ -195,6 +195,26 @@ void chc_packet_clear(chc_client *c, chc_packet *p);
 int  chc_client_send_data(chc_client *c, const chc_block_builder *bb,
                           chc_err *err);
 
+/* Own encoded block bytes for reuse on connections with matching compression. */
+typedef struct chc_prepared_block {
+    chc_compression compression;
+    uint64_t        n_rows;
+    size_t          raw_len;   /* serialized body bytes before compression */
+    uint8_t        *bytes;
+    size_t          len;
+    size_t          cap;
+} chc_prepared_block;
+
+/* Free any existing prepared block before reusing `out`. */
+int  chc_block_prepare(const chc_block_builder *bb, chc_compression compression,
+                       const chc_codec *codec, const chc_alloc *al,
+                       chc_prepared_block *out, chc_err *err);
+void chc_prepared_block_free(chc_prepared_block *pb, const chc_alloc *al);
+
+/* Send stored block bytes. Reject mismatched compression before writing. */
+int  chc_client_send_prepared(chc_client *c, const chc_prepared_block *pb,
+                              chc_err *err);
+
 int  chc_client_send_cancel(chc_client *c, chc_err *err);
 int  chc_client_send_ping(chc_client *c, chc_err *err);
 
@@ -330,6 +350,18 @@ chc__read_server_string(chc_in *in, char *dst, size_t cap, chc_err *err)
     return chc__skip_bytes(in, (size_t) len - n, err);
 }
 
+static int
+chc__skip_string(chc_in *in, chc_err *err)
+{
+    uint64_t len;
+    int rc = chc__read_varuint(in, &len, err);
+    if (rc != CHC_OK) return rc;
+    if (len > CHC_MAX_STRING_SIZE)
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "string too long: %llu",
+                            (unsigned long long) len);
+    return chc__skip_bytes(in, (size_t) len, err);
+}
+
 static void
 chc__client_setup(chc_client *c, const chc_client_opts *opts)
 {
@@ -382,9 +414,8 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
                             (unsigned long long) kind);
 
     /* Commit only complete Hello, async handshake retries on WOULD_BLOCK */
-    chc_server_info s = {};
+    chc_server_info s = {0};
     uint64_t n_rules, nonce;
-    char rule[1];
     if ((rc = chc__read_server_string(&c->in, s.name, sizeof s.name, err)) ||
         (rc = chc__read_varuint(&c->in, &s.version_major, err)) ||
         (rc = chc__read_varuint(&c->in, &s.version_minor, err)) ||
@@ -406,7 +437,7 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
                             (unsigned long long) n_rules);
     /* Pattern & message pairs, discarded */
     for (uint64_t i = 0; i < 2 * n_rules; i++)
-        if ((rc = chc__read_server_string(&c->in, rule, sizeof rule, err))) return rc;
+        if ((rc = chc__skip_string(&c->in, err))) return rc;
     /* Nonce only serves interserver secret */
     if ((rc = chc__read_u64_le(&c->in, &nonce, err))) return rc;
     c->server = s;
@@ -444,7 +475,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
                 const chc_alloc *al, chc_io *io, chc_exception **exc,
                 chc_err *err)
 {
-    chc_client_opts def_opts = {};
+    chc_client_opts def_opts = {0};
     if (!opts) opts = &def_opts;
 
     chc_client *c = chc__calloc(al, sizeof *c, err);
@@ -549,15 +580,12 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
         return chc__err_set(err, CHC_ERR_USAGE,
                             "compression enabled but codec is NULL");
 
-    chc__mem_sink ms;
-    chc_io sink_io;
-    chc__mem_sink_init(&ms, &sink_io, c->al);
-    rc = chc__client_write_block_body(&sink_io, bb, err);
-    if (rc != CHC_OK) { chc__mem_sink_free(&ms); return rc; }
-    rc = chc__comp_emit_chunks(c->io, c->codec, c->compression,
-                               ms.buf, ms.len, c->al, err);
-    chc__mem_sink_free(&ms);
-    return rc;
+    chc__frame_sink fs;
+    chc_io frames_io;
+    rc = chc__frame_sink_init(&fs, &frames_io, c->io, c->codec, c->compression,
+                              c->al, err);
+    if (rc == CHC_OK) rc = chc__client_write_block_body(&frames_io, bb, err);
+    return chc__frame_sink_finish(&fs, rc, err);
 }
 
 int
@@ -567,10 +595,68 @@ chc_client_send_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
 }
 
 int
+chc_block_prepare(const chc_block_builder *bb, chc_compression compression,
+                  const chc_codec *codec, const chc_alloc *al,
+                  chc_prepared_block *out, chc_err *err)
+{
+    *out = (chc_prepared_block) {
+        .compression = compression,
+        .n_rows      = bb ? bb->n_rows : 0,
+    };
+    if (compression != CHC_COMP_NONE && !codec)
+        return chc__err_set(err, CHC_ERR_USAGE,
+                            "compression enabled but codec is NULL");
+
+    chc__mem_sink sink;
+    chc_io sink_io;
+    chc__mem_sink_init(&sink, &sink_io, al);
+    int rc;
+    if (compression == CHC_COMP_NONE) {
+        rc = chc__client_write_block_body(&sink_io, bb, err);
+        out->raw_len = sink.len;
+    } else {
+        chc__frame_sink fs;
+        chc_io frames_io;
+        rc = chc__frame_sink_init(&fs, &frames_io, &sink_io, codec, compression,
+                                  al, err);
+        if (rc == CHC_OK) rc = chc__client_write_block_body(&frames_io, bb, err);
+        rc = chc__frame_sink_finish(&fs, rc, err);
+        out->raw_len = fs.total;
+    }
+    if (rc != CHC_OK) { chc__mem_sink_free(&sink); return rc; }
+    out->bytes = sink.buf;
+    out->len   = sink.len;
+    out->cap   = sink.cap;
+    return CHC_OK;
+}
+
+void
+chc_prepared_block_free(chc_prepared_block *pb, const chc_alloc *al)
+{
+    if (!pb) return;
+    if (pb->bytes) al->free(al->ud, pb->bytes, pb->cap);
+    pb->bytes = NULL;
+    pb->len = pb->cap = 0;
+}
+
+int
+chc_client_send_prepared(chc_client *c, const chc_prepared_block *pb,
+                         chc_err *err)
+{
+    if (pb->compression != c->compression)
+        return chc__err_set(err, CHC_ERR_USAGE,
+                            "prepared block compression differs from connection");
+    int rc;
+    if ((rc = chc__write_varuint(c->io, CHC__CLIENT_DATA, err))) return rc;
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
+    return chc__write_bytes(c->io, pb->bytes, pb->len, err);
+}
+
+int
 chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
                          const chc_query_opts *opts, chc_err *err)
 {
-    chc_query_opts def = {};
+    chc_query_opts def = {0};
     if (!opts) opts = &def;
 
     int rc;
@@ -581,7 +667,7 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
      * We send the minimum the server tolerates (initial fields blank,
      * iface=TCP); only client_name identifies us. */
     uint8_t query_kind = 1;       /* INITIAL_QUERY */
-    uint8_t z8[8] = {};
+    uint8_t z8[8] = {0};
     uint8_t iface_type = 1;       /* TCP */
     uint8_t no_otel = 0;
     if ((rc = chc__write_bytes (c->io, &query_kind, 1, err))) return rc;
@@ -669,17 +755,6 @@ chc_packet_clear(chc_client *c, chc_packet *p)
     default:
         break;
     }
-}
-
-/* Skip temp-table name or log tag block-bearing packets carry before block */
-static int
-chc__recv_skip_lead_string(chc_client *c, chc_err *err)
-{
-    char *s; size_t slen;
-    int rc = chc__read_string(&c->in, &s, &slen, err);
-    if (rc != CHC_OK) return rc;
-    c->al->free(c->al->ud, s, slen + 1);
-    return CHC_OK;
 }
 
 /* Read one compressed block body from c->in into *out, io-backed
@@ -860,11 +935,8 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
         case CHC_PKT_TABLE_COLUMNS: {
             out->kind = CHC_PKT_TABLE_COLUMNS;
             /* table name + columns metadata; both varstrings, both ignored. */
-            char *s; size_t slen;
-            if ((rc = chc__read_string(&c->in, &s, &slen, err))) goto maybe_rewind;
-            c->al->free(c->al->ud, s, slen + 1);
-            if ((rc = chc__read_string(&c->in, &s, &slen, err))) goto maybe_rewind;
-            c->al->free(c->al->ud, s, slen + 1);
+            if ((rc = chc__skip_string(&c->in, err)) ||
+                (rc = chc__skip_string(&c->in, err))) goto maybe_rewind;
             goto control_done;
         }
 
@@ -891,7 +963,8 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
                                 (unsigned long long) kind);
         }
 
-        rc = chc__recv_skip_lead_string(c, err);
+        /* Skip temp-table name or log tag preceding block */
+        rc = chc__skip_string(&c->in, err);
         if (rc != CHC_OK) goto maybe_rewind;
 
         /* Kind + leading string committed; resume owns the cursor from here.

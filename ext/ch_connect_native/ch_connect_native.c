@@ -887,10 +887,8 @@ native_client_send_query(VALUE self, VALUE sql, VALUE params, VALUE settings)
     }
 
     chc_err err = {0};
-    /* the async wrapper has no send_query_ex; call it on the embedded client
-     * (same out-sink io) so settings and params are included */
-    int rc = chc_client_send_query_ex(&nc->ac->cli, RSTRING_PTR(sql), (size_t)RSTRING_LEN(sql),
-                                      &qopts, &err);
+    int rc = chc_async_send_query_ex(nc->ac, RSTRING_PTR(sql), (size_t)RSTRING_LEN(sql),
+                                     &qopts, &err);
     ALLOCV_END(cparams_buf);
     ALLOCV_END(csettings_buf);
     RB_GC_GUARD(flat);
