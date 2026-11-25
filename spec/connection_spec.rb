@@ -10,6 +10,24 @@ RSpec.describe ChConnect::Connection do
 
   after { @connection&.close }
 
+  def wire_varuint(value)
+    bytes = []
+    while value >= 128
+      bytes << ((value & 127) | 128)
+      value >>= 7
+    end
+    (bytes << value).pack("C*")
+  end
+
+  def wire_string(value)
+    wire_varuint(value.bytesize) + value.b
+  end
+
+  def wire_exception(message)
+    "\x02".b + [516].pack("l<") + wire_string("AUTHENTICATION_FAILED") +
+      wire_string(message) + wire_string("") + "\x00".b
+  end
+
   describe "#initialize" do
     it "captures an immutable configuration snapshot" do
       original_database = config.database
@@ -230,24 +248,6 @@ RSpec.describe ChConnect::Connection do
 
     after { client.close }
 
-    def wire_varuint(value)
-      bytes = []
-      while value >= 128
-        bytes << ((value & 127) | 128)
-        value >>= 7
-      end
-      (bytes << value).pack("C*")
-    end
-
-    def wire_string(value)
-      wire_varuint(value.bytesize) + value.b
-    end
-
-    def wire_exception(message)
-      "\x02".b + [516].pack("l<") + wire_string("AUTHENTICATION_FAILED") +
-        wire_string(message) + wire_string("") + "\x00".b
-    end
-
     it "preserves a long UTF-8 server error after fragmented input" do
       message = "Authentication failed: #{"é" * 300} end"
       packet = wire_exception(message)
@@ -296,6 +296,62 @@ RSpec.describe ChConnect::Connection do
       expect { client.handshake_step }
         .to raise_error(ChConnect::ConnectionError, /server revision 54461 older than 54462/)
       expect(client).to be_broken
+    end
+  end
+
+  describe "native response validation" do
+    let(:hello) do
+      "\x00".b + wire_string("ClickHouse") + wire_varuint(23) +
+        wire_varuint(3) + wire_varuint(54465) + wire_string("UTC") +
+        wire_string("localhost") + wire_varuint(1) + wire_varuint(0) + [0].pack("Q<")
+    end
+
+    def query_client(compression)
+      client = native_client_class.new("default", "default", "", compression)
+      client.handshake_step
+      client.take_output
+      client.feed(hello)
+      client.handshake_step
+      client.take_output
+      client.feed(wire_varuint(4)) # Pong
+      expect(client.handshake_step).to eq(:done)
+      client.send_query("SELECT 1", nil, nil)
+      client.take_output
+      client
+    end
+
+    # Data packet up to the first column's custom-serialization flag.
+    def data_packet_header(type)
+      wire_varuint(1) + wire_string("") +
+        wire_varuint(1) + "\x00".b + wire_varuint(2) + [-1].pack("l<") + wire_varuint(0) +
+        wire_varuint(1) + wire_varuint(1) + wire_string("c") + wire_string(type) + "\x00".b
+    end
+
+    it "rejects a LowCardinality(Nullable) column without an inner type" do
+      client = query_client(nil)
+      # Shared-dictionary key version, UInt8 keys with additional keys, 1-entry dictionary
+      lc_body = [1, 0x200, 1].pack("Q<*") + "\x00".b * 64
+      client.feed(data_packet_header("LowCardinality(Nullable)") + lc_body)
+
+      expect { client.recv_step }
+        .to raise_error(ChConnect::UnsupportedTypeError, /wrong number of argument types/)
+      expect(client).to be_broken
+    ensure
+      client&.close
+    end
+
+    it "rejects compressed frames declaring more than 1 GiB before reading them" do
+      skip "ZSTD is unavailable" unless native_client_class.const_get(:ZSTD_AVAILABLE, false)
+      client = query_client(:zstd)
+      checksum = "\x00".b * 16
+      frame_header = "\x90".b + [9 + 16].pack("L<") + [0x4000_0001].pack("L<")
+      client.feed(wire_varuint(1) + wire_string("") + checksum + frame_header)
+
+      expect { client.recv_step }
+        .to raise_error(ChConnect::ConnectionError, /original size invalid: 1073741825/)
+      expect(client).to be_broken
+    ensure
+      client&.close
     end
   end
 

@@ -83,6 +83,15 @@ struct chc_codec {
  * a frame at 1 GiB; we stay well under it at 64 KiB. */
 #define CHC_COMPRESS_MAX_CHUNK 65535u
 
+/* Received frame cap for both compressed & original size. Default matches
+ * ClickHouse's DBMS_MAX_COMPRESSED_SIZE */
+#ifndef CHC_MAX_FRAME_SIZE
+#define CHC_MAX_FRAME_SIZE 0x40000000u
+#endif
+#if CHC_MAX_FRAME_SIZE > 0x7fffffff
+#error "CHC_MAX_FRAME_SIZE exceeds LZ4 int sizes"
+#endif
+
 /* Internal-but-exported: 128-bit CityHash. Returned as the two 64-bit
  * halves the wire-format encodes (lo first, hi second). Frozen variant
  * the server uses. */
@@ -104,7 +113,6 @@ void chc_zstd_codec_init(chc_codec *out);
 
 #ifdef CHC_IMPLEMENTATION
 
-#include <limits.h>
 #include <string.h>
 
 /* ============================================================
@@ -181,7 +189,7 @@ chc__city_hash128_with_seed(const char *s, size_t len, chc__u128 seed)
 {
     if (len < 128) return chc__city_murmur(s, len, seed);
 
-    chc__u128 v = {}, w = {};
+    chc__u128 v = {0}, w = {0};
     uint64_t x = seed.a, y = seed.b;
     uint64_t z = len * chc__city_k1;
     v.a = chc__city_rotate(y ^ chc__city_k1, 49) * chc__city_k1 + chc__city_fetch64(s);
@@ -375,23 +383,71 @@ chc__mem_sink_free(chc__mem_sink *s)
     s->cap = s->len = 0;
 }
 
-/* Emit a buffered block as one or more compressed frames to io. */
+/* chc_io compressing every CHC_COMPRESS_MAX_CHUNK bytes written into one
+ * frame on `out`, so a body never sits uncompressed whole. */
+typedef struct chc__frame_sink {
+    chc_io          *out;
+    const chc_codec *codec;
+    chc_compression  m;
+    const chc_alloc *al;
+    uint8_t         *buf;
+    size_t           len;
+    size_t           total;
+} chc__frame_sink;
+
 static int
-chc__comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
-                      const void *src, size_t src_len,
-                      const chc_alloc *al, chc_err *err)
+chc__frame_sink_write(void *ud, const void *p, size_t n, chc_err *err)
 {
-    const uint8_t *p = src;
-    size_t left = src_len;
-    while (left) {
-        size_t take = left > CHC_COMPRESS_MAX_CHUNK
-                          ? CHC_COMPRESS_MAX_CHUNK : left;
-        int rc = chc__comp_emit_frame(io, codec, m, p, take, al, err);
-        if (rc != CHC_OK) return rc;
-        p    += take;
-        left -= take;
+    chc__frame_sink *s = ud;
+    const uint8_t *src = p;
+    s->total += n;
+    while (n) {
+        if (!s->len && n >= CHC_COMPRESS_MAX_CHUNK) {
+            int rc = chc__comp_emit_frame(s->out, s->codec, s->m, src,
+                                          CHC_COMPRESS_MAX_CHUNK, s->al, err);
+            if (rc != CHC_OK) return rc;
+            src += CHC_COMPRESS_MAX_CHUNK;
+            n   -= CHC_COMPRESS_MAX_CHUNK;
+            continue;
+        }
+        size_t take = CHC_COMPRESS_MAX_CHUNK - s->len;
+        if (take > n) take = n;
+        memcpy(s->buf + s->len, src, take);
+        s->len += take;
+        src    += take;
+        n      -= take;
+        if (s->len == CHC_COMPRESS_MAX_CHUNK) {
+            s->len = 0;
+            int rc = chc__comp_emit_frame(s->out, s->codec, s->m, s->buf,
+                                          CHC_COMPRESS_MAX_CHUNK, s->al, err);
+            if (rc != CHC_OK) return rc;
+        }
     }
     return CHC_OK;
+}
+
+CHC_MAYBE_UNUSED static int
+chc__frame_sink_init(chc__frame_sink *s, chc_io *io, chc_io *out,
+                     const chc_codec *codec, chc_compression m,
+                     const chc_alloc *al, chc_err *err)
+{
+    *s = (chc__frame_sink) { .out = out, .codec = codec, .m = m, .al = al };
+    *io = (chc_io) { .ud = s, .write = chc__frame_sink_write };
+    s->buf = chc__alloc(al, CHC_COMPRESS_MAX_CHUNK, err);
+    return s->buf ? CHC_OK : CHC_ERR_OOM;
+}
+
+/* Emit the partial last frame and release the staging buffer */
+CHC_MAYBE_UNUSED static int
+chc__frame_sink_finish(chc__frame_sink *s, int rc, chc_err *err)
+{
+    if (rc == CHC_OK && s->len)
+        rc = chc__comp_emit_frame(s->out, s->codec, s->m, s->buf, s->len,
+                                  s->al, err);
+    if (s->buf) s->al->free(s->al->ud, s->buf, CHC_COMPRESS_MAX_CHUNK);
+    s->buf = NULL;
+    s->len = 0;
+    return rc;
 }
 
 /* ---------- decompression side ---------- */
@@ -430,14 +486,29 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
     if (comp_with_hdr < CHC__COMP_HEADER_BYTES)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
             "compressed frame too short: %u", comp_with_hdr);
-    if (comp_with_hdr > 0x40000000u)
+    if (comp_with_hdr > CHC_MAX_FRAME_SIZE)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
             "compressed frame oversized: %u", comp_with_hdr);
-    /* LZ4 API sizes are int; reject dst outside domain before (int)
-     * narrowing in codec adapter. src side bounded by frame cap above */
-    if (method == CHC__COMP_LZ4 && orig > (uint32_t) INT_MAX)
+    /* ClickHouse never writes empty frames */
+    if (!orig || orig > CHC_MAX_FRAME_SIZE)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
-            "LZ4 original size oversized: %u", orig);
+            "compressed frame original size invalid: %u", orig);
+    int (*decompress)(void *, const void *, size_t, void *, size_t, chc_err *);
+    switch (method) {
+    case CHC__COMP_LZ4:
+        decompress = s->codec ? s->codec->lz4_decompress : NULL;
+        break;
+    case CHC__COMP_ZSTD:
+        decompress = s->codec ? s->codec->zstd_decompress : NULL;
+        break;
+    default:
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+            "unknown compression method 0x%02x", method);
+    }
+    if (!decompress)
+        return chc__err_set(err, CHC_ERR_USAGE,
+            "%s frame received but no codec configured",
+            method == CHC__COMP_LZ4 ? "LZ4" : "ZSTD");
 
     size_t payload = comp_with_hdr - CHC__COMP_HEADER_BYTES;
     /* Capture the bytes hashed: header (9B) + payload. */
@@ -464,29 +535,9 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
         if (!nb) return CHC_ERR_OOM;
         s->frame_buf = nb; s->frame_cap = orig;
     }
-    switch (method) {
-    case CHC__COMP_LZ4:
-        if (!s->codec || !s->codec->lz4_decompress)
-            return chc__err_set(err, CHC_ERR_USAGE,
-                "LZ4 frame received but no codec configured");
-        rc = s->codec->lz4_decompress(s->codec->ud,
-            s->comp_buf + CHC__COMP_HEADER_BYTES, payload,
-            s->frame_buf, orig, err);
-        if (rc) return rc;
-        break;
-    case CHC__COMP_ZSTD:
-        if (!s->codec || !s->codec->zstd_decompress)
-            return chc__err_set(err, CHC_ERR_USAGE,
-                "ZSTD frame received but no codec configured");
-        rc = s->codec->zstd_decompress(s->codec->ud,
-            s->comp_buf + CHC__COMP_HEADER_BYTES, payload,
-            s->frame_buf, orig, err);
-        if (rc) return rc;
-        break;
-    default:
-        return chc__err_set(err, CHC_ERR_PROTOCOL,
-            "unknown compression method 0x%02x", method);
-    }
+    rc = decompress(s->codec->ud, s->comp_buf + CHC__COMP_HEADER_BYTES,
+                    payload, s->frame_buf, orig, err);
+    if (rc) return rc;
     s->frame_pos = 0;
     s->frame_fill = orig;
     return CHC_OK;

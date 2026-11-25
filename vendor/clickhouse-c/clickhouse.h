@@ -26,7 +26,9 @@
 /* Macros use C23 features when available, degrading to GNU/builtin equivalent,
  * then to harmless nop, so consumers may build under any -std >= c11 */
 
-#if defined(__has_c_attribute)
+/* [[attr]] syntax is C23; GCC reports __has_c_attribute under earlier -std
+ * too, then warns on every use with -Wpedantic */
+#if defined(__has_c_attribute) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #  define CHC__HAS_ATTR(x) __has_c_attribute(x)
 #else
 #  define CHC__HAS_ATTR(x) 0
@@ -70,7 +72,12 @@
 
 #if CHC__HAS_ATTR(fallthrough)
 #  define CHC_FALLTHROUGH [[fallthrough]]
-#else
+#elif defined(__has_attribute)
+#  if __has_attribute(fallthrough)
+#    define CHC_FALLTHROUGH __attribute__((fallthrough))
+#  endif
+#endif
+#ifndef CHC_FALLTHROUGH
 #  define CHC_FALLTHROUGH
 #endif
 
@@ -255,12 +262,6 @@ const char  *chc_type_tuple_field_name(const chc_type *t, size_t i,
 
 /* Return an aggregate function name without parameters, or NULL when absent */
 const char  *chc_type_agg_function(const chc_type *t, size_t *out_len);
-
-/* Reproduce the printable type name into buf. Returns the number of bytes
- * that would have been written (snprintf-style); use to size buf on a
- * second pass when the return value >= buf_len. buf may be NULL when
- * buf_len == 0 (length query). */
-size_t       chc_type_format(const chc_type *t, char *buf, size_t buf_len);
 
 /* -------------------------------------------------------------------------- */
 /* Columns                                                                    */
@@ -725,11 +726,18 @@ chc_alloc chc_alloc_stdlib(void) {
 #ifndef CHC_MAX_STRING_SIZE
 #define CHC_MAX_STRING_SIZE       (1ULL << 30)
 #endif
+#if CHC_MAX_STRING_SIZE >= SIZE_MAX
+#  error "CHC_MAX_STRING_SIZE must leave room for NUL terminator in size_t"
+#endif
 #ifndef CHC_MAX_NUM_COLUMNS
 #define CHC_MAX_NUM_COLUMNS       1000000ULL
 #endif
 #ifndef CHC_MAX_NUM_ROWS
-#define CHC_MAX_NUM_ROWS          1000000000000ULL
+/* Row counts size arrays, so 32-bit targets stop at SIZE_MAX */
+#define CHC_MAX_NUM_ROWS          (SIZE_MAX < 1000000000000ULL ? SIZE_MAX : 1000000000000ULL)
+#endif
+#if CHC_MAX_NUM_ROWS > SIZE_MAX
+#  error "CHC_MAX_NUM_ROWS must fit size_t"
 #endif
 #ifndef CHC_MAX_FIXEDSTRING_SIZE
 #define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
@@ -841,7 +849,7 @@ chc_in_free(chc_in *in)
 
 /* Mark read cursor for rewind. Ioless mode checkpoints at packet boundaries,
  * allowing mid-parse CHC_WOULD_BLOCK to rewind & retry after more bytes arrive */
-CHC_MAYBE_UNUSED static void
+static void
 chc__in_checkpoint(chc_in *in)
 {
     in->mark = in->pos;
@@ -850,7 +858,7 @@ chc__in_checkpoint(chc_in *in)
 /* Restore the cursor to the last checkpoint, un-counting bytes consumed
  * since it (so consumed stays equal to an io-backed read of the same
  * stream). Clears the mark. */
-CHC_MAYBE_UNUSED static int
+static int
 chc__in_rewind(chc_in *in)
 {
     if (in->mark == SIZE_MAX)
@@ -962,11 +970,17 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
 static int
 chc__skip_bytes(chc_in *in, size_t n, chc_err *err)
 {
-    uint8_t sink[256];
     while (n) {
-        size_t take = n < sizeof sink ? n : sizeof sink;
-        int rc = chc__read_bytes(in, sink, take, err);
-        if (rc != CHC_OK) return rc;
+        if (in->pos >= in->fill) {
+            int rc = chc__in_refill(in, err);
+            if (rc == CHC_ERR_EOF)
+                return chc__err_set(err, CHC_ERR_EOF, "short read");
+            if (rc != CHC_OK) return rc;
+        }
+        size_t avail = in->fill - in->pos;
+        size_t take = n < avail ? n : avail;
+        in->pos += take;
+        in->consumed += take;
         n -= take;
     }
     return CHC_OK;
@@ -1007,21 +1021,33 @@ chc__read_u64_le(chc_in *in, uint64_t *out, chc_err *err)
 }
 
 static int
-chc__read_string(chc_in *in, char **out, size_t *out_len, chc_err *err)
+chc__read_alloc(chc_in *in, size_t n, size_t pad, void **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
+    void *buf = chc__alloc(al, n + pad, err);
+    if (!buf) return CHC_ERR_OOM;
+    int rc = n ? chc__read_bytes(in, buf, n, err) : CHC_OK;
+    if (rc != CHC_OK) {
+        al->free(al->ud, buf, n + pad);
+        return rc;
+    }
+    *out = buf;
+    return CHC_OK;
+}
+
+static int
+chc__read_string(chc_in *in, char **out, size_t *out_len, chc_err *err)
+{
     uint64_t len;
     int rc = chc__read_varuint(in, &len, err);
     if (rc != CHC_OK) return rc;
     if (len > CHC_MAX_STRING_SIZE)
         return chc__err_set(err, CHC_ERR_PROTOCOL, "string too long: %llu",
                             (unsigned long long) len);
-    char *buf = chc__alloc(al, len + 1, err);
-    if (!buf) return CHC_ERR_OOM;
-    if (len) {
-        rc = chc__read_bytes(in, buf, (size_t) len, err);
-        if (rc != CHC_OK) { al->free(al->ud, buf, len + 1); return rc; }
-    }
+    void *p;
+    rc = chc__read_alloc(in, (size_t) len, 1, &p, err);
+    if (rc != CHC_OK) return rc;
+    char *buf = p;
     buf[len] = '\0';
     *out = buf;
     *out_len = (size_t) len;
@@ -1098,7 +1124,7 @@ int              chc_type_decimal_scale(const chc_type *t)      { return (t && c
 int              chc_type_datetime64_scale(const chc_type *t)   { return (t && (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64)) ? t->temporal.scale : 0; }
 chc_interval_unit chc_type_interval_unit(const chc_type *t)     { return (t && t->kind == CHC_INTERVAL) ? t->interval : CHC_INTERVAL_NONE; }
 size_t           chc_type_qbit_dimension(const chc_type *t)     { return (t && t->kind == CHC_QBIT) ? t->qbit.dimension : 0; }
-size_t           chc_type_qbit_element_size(const chc_type *t)  { return (t && t->kind == CHC_QBIT && t->n_children == 1) ? chc_type_elem_size(t->children[0]) * 8 : 0; }
+size_t           chc_type_qbit_element_size(const chc_type *t)  { return (t && t->kind == CHC_QBIT) ? chc_type_elem_size(t->children[0]) * 8 : 0; }
 const char      *chc_type_name(const chc_type *t, size_t *out_len) {
     if (out_len) *out_len = t ? t->name_len : 0;
     return t ? t->name : NULL;
@@ -1472,7 +1498,7 @@ chc__fields_free(const chc_alloc *al, chc__fields *f)
         al->free(al->ud, f->names[i], f->lens[i] + 1);
     al->free(al->ud, f->names, f->n_names * sizeof *f->names);
     al->free(al->ud, f->lens,  f->n_lens * sizeof *f->lens);
-    *f = (chc__fields) {};
+    *f = (chc__fields) {0};
 }
 
 static int
@@ -1757,23 +1783,17 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                     return rc;
                 }
             }
-            if (!t->n_children) {
-                chc_type_destroy(t, al);
-                return chc__err_set(err, CHC_ERR_TYPE,
-                    "%.*s: %.*s has no argument type",
-                    (int) head.len, head.start, (int) fn.len, fn.start);
-            }
         } else {
             /* Tuple and Nested fields may have names before their types */
             bool        named     = (t->kind == CHC_TUPLE
                                      || t->kind == CHC_NESTED);
             bool        any_named = false;
-            chc__fields fields    = {};
+            chc__fields fields    = {0};
             for (;;) {
                 chc__tok la = chc__peek_tok(lx);
                 if (la.kind == CHC__TOK_RPAREN) break;
 
-                chc__tok field = {};
+                chc__tok field = {0};
                 bool has_field = false;
                 if (named && la.kind == CHC__TOK_NAME) {
                     chc__eat_tok(lx);
@@ -1857,6 +1877,19 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
         /* Treat Decimal without parameters as Decimal128 */
     }
 
+    /* Readers & writers index children directly */
+    size_t arity = t->kind == CHC_MAP ? 2
+                 : (t->kind == CHC_NULLABLE || t->kind == CHC_LOW_CARDINALITY
+                    || t->kind == CHC_ARRAY || t->kind == CHC_QBIT) ? 1 : 0;
+    if (arity ? t->n_children != arity
+              : t->kind == CHC_AGGREGATE_FUNCTION ? !t->agg.func
+              : !t->n_children && (t->kind == CHC_NESTED
+                                   || t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION)) {
+        chc_type_destroy(t, al);
+        return chc__err_set(err, CHC_ERR_TYPE, "%.*s: wrong number of argument types",
+                            (int) head.len, head.start);
+    }
+
     t->name = chc__strdup(al, name_start, (size_t) (name_end - name_start), err);
     if (!t->name) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
     t->name_len = (size_t) (name_end - name_start);
@@ -1869,7 +1902,7 @@ int
 chc_type_parse(const char *name, size_t name_len,
                const chc_alloc *al, chc_type **out, chc_err *err)
 {
-    chc__lex lx = { name, name + name_len, {}, false };
+    chc__lex lx = { name, name + name_len, {0}, false };
     int rc = chc__parse_type(&lx, al, name, name + name_len, 0, out, err);
     if (rc != CHC_OK) return rc;
     chc__tok tail = chc__eat_tok(&lx);
@@ -1879,21 +1912,6 @@ chc_type_parse(const char *name, size_t name_len,
         return chc__err_set(err, CHC_ERR_TYPE, "trailing tokens in type name");
     }
     return CHC_OK;
-}
-
-size_t
-chc_type_format(const chc_type *t, char *buf, size_t buf_len)
-{
-    if (!t) return 0;
-    if (t->name && t->name_len) {
-        if (buf && buf_len) {
-            size_t take = t->name_len < buf_len - 1 ? t->name_len : buf_len - 1;
-            memcpy(buf, t->name, take);
-            buf[take] = '\0';
-        }
-        return t->name_len;
-    }
-    return 0;
 }
 
 /* -------- column internals ---------- */
@@ -2069,10 +2087,10 @@ chc__col_read_fixed(chc_in *in, size_t elem_size, size_t n_rows,
             chc__column_destroy(c, al);
             return chc__err_set(err, CHC_ERR_PROTOCOL, "column size overflow");
         }
-        c->fixed.data = chc__alloc(al, nbytes, err);
-        if (!c->fixed.data) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        int rc = chc__read_bytes(in, c->fixed.data, nbytes, err);
+        void *p;
+        int rc = chc__read_alloc(in, nbytes, 0, &p, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+        c->fixed.data = p;
     }
     *out = c;
     return CHC_OK;
@@ -2222,7 +2240,7 @@ chc__geo_alias(const chc_type *t)
 static const chc_type *
 chc__serial_type(const chc_type *t)
 {
-    while (t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION && t->n_children)
+    while (t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION)
         t = t->children[0];
     return chc__geo_alias(t);
 }
@@ -2417,17 +2435,15 @@ chc__col_read(chc_in *in, const chc_type *t,
         return chc__col_read_string(in, n_rows, out, err);
 
     case CHC_NULLABLE: {
-        if (t->n_children != 1)
-            return chc__err_set(err, CHC_ERR_TYPE, "Nullable expects 1 child");
         chc_column *c = chc__calloc(al, sizeof *c, err);
         if (!c) return CHC_ERR_OOM;
         c->layout = CHC_COL_NULLABLE;
         c->n_rows = n_rows;
         if (n_rows) {
-            c->nullable.null_map = chc__alloc(al, n_rows, err);
-            if (!c->nullable.null_map) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            int rc = chc__read_bytes(in, c->nullable.null_map, n_rows, err);
+            void *p;
+            int rc = chc__read_alloc(in, n_rows, 0, &p, err);
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+            c->nullable.null_map = p;
         }
         int rc = chc__col_read(in, t->children[0], n_rows, &c->nullable.inner, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
@@ -2438,12 +2454,6 @@ chc__col_read(chc_in *in, const chc_type *t,
     case CHC_ARRAY:
     case CHC_NESTED:
     case CHC_MAP: {
-        if (t->kind == CHC_ARRAY && t->n_children != 1)
-            return chc__err_set(err, CHC_ERR_TYPE, "Array expects 1 child");
-        if (t->kind == CHC_MAP && t->n_children != 2)
-            return chc__err_set(err, CHC_ERR_TYPE, "Map expects 2 children");
-        if (t->kind == CHC_NESTED && !t->n_children)
-            return chc__err_set(err, CHC_ERR_TYPE, "Nested has no fields");
         chc_column *c = chc__calloc(al, sizeof *c, err);
         if (!c) return CHC_ERR_OOM;
         c->layout = CHC_COL_ARRAY;
@@ -2455,10 +2465,10 @@ chc__col_read(chc_in *in, const chc_type *t,
                 chc__column_destroy(c, al);
                 return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
             }
-            c->array.offsets = chc__alloc(al, offs_bytes, err);
-            if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
+            void *p;
+            int rc = chc__read_alloc(in, offs_bytes, 0, &p, err);
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+            c->array.offsets = p;
             chc__swap_offsets(c->array.offsets, n_rows);
             total = c->array.offsets[n_rows - 1];
             if (total > CHC_MAX_NUM_ROWS) {
@@ -2484,8 +2494,6 @@ chc__col_read(chc_in *in, const chc_type *t,
         /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
          * bit-plane column per element bit, MSB plane first. */
         size_t bits = chc_type_qbit_element_size(t);
-        if (!bits || t->n_children != 1)
-            return chc__err_set(err, CHC_ERR_TYPE, "QBit: invalid element type");
         size_t bytes_per_plane = (t->qbit.dimension + 7) / 8;
         chc_column *c = chc__calloc(al, sizeof *c, err);
         if (!c) return CHC_ERR_OOM;
@@ -2504,8 +2512,6 @@ chc__col_read(chc_in *in, const chc_type *t,
     }
 
     case CHC_LOW_CARDINALITY: {
-        if (t->n_children != 1)
-            return chc__err_set(err, CHC_ERR_TYPE, "LowCardinality expects 1 child");
         const chc_type *inner = t->children[0];
         const chc_type *dict_type = inner;
         bool nullable_wrap = false;
@@ -2608,9 +2614,7 @@ chc__col_read(chc_in *in, const chc_type *t,
             chc__column_destroy(c, al);
             return chc__err_set(err, CHC_ERR_PROTOCOL, "LowCardinality keys size overflow");
         }
-        c->lc.keys = chc__alloc(al, keys_bytes, err);
-        if (!c->lc.keys) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        rc = chc__read_bytes(in, c->lc.keys, keys_bytes, err);
+        rc = chc__read_alloc(in, keys_bytes, 0, &c->lc.keys, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         chc__swap_keys(c->lc.keys, n_rows, c->lc.key_size);
 
@@ -2620,8 +2624,6 @@ chc__col_read(chc_in *in, const chc_type *t,
 
     case CHC_SIMPLE_AGGREGATE_FUNCTION:
         /* ClickHouse stores values using this function's first argument type */
-        if (t->n_children < 1)
-            return chc__err_set(err, CHC_ERR_TYPE, "SimpleAggregateFunction has no inner type");
         return chc__col_read(in, t->children[0], n_rows, out, err);
 
     case CHC_POINT:
@@ -2734,20 +2736,40 @@ struct chc_block {
     chc_column  **columns;
 };
 
+/* Per-column slices share one allocation starting at names */
+typedef struct {
+    size_t types, columns, name_lens, size;
+} chc__block_layout;
+
+static size_t
+chc__align_up(size_t n, size_t a)
+{
+    return (n + a - 1) / a * a;
+}
+
+static chc__block_layout
+chc__block_slices_layout(size_t cap)
+{
+    chc__block_layout l;
+    l.types     = chc__align_up(cap * sizeof(char *), _Alignof(chc_type *));
+    l.columns   = chc__align_up(l.types + cap * sizeof(chc_type *),
+                                _Alignof(chc_column *));
+    l.name_lens = chc__align_up(l.columns + cap * sizeof(chc_column *),
+                                _Alignof(size_t));
+    l.size      = l.name_lens + cap * sizeof(size_t);
+    return l;
+}
+
 void
 chc_block_destroy(chc_block *b, const chc_alloc *al)
 {
     if (!b) return;
     for (size_t i = 0; i < b->n_columns; i++) {
-        if (b->names && b->names[i])
-            al->free(al->ud, b->names[i], b->name_lens[i] + 1);
-        if (b->types) chc_type_destroy(b->types[i], al);
-        if (b->columns) chc__column_destroy(b->columns[i], al);
+        if (b->names[i]) al->free(al->ud, b->names[i], b->name_lens[i] + 1);
+        chc_type_destroy(b->types[i], al);
+        chc__column_destroy(b->columns[i], al);
     }
-    al->free(al->ud, b->names,     b->n_columns * sizeof *b->names);
-    al->free(al->ud, b->name_lens, b->n_columns * sizeof *b->name_lens);
-    al->free(al->ud, b->types,     b->n_columns * sizeof *b->types);
-    al->free(al->ud, b->columns,   b->n_columns * sizeof *b->columns);
+    al->free(al->ud, b->names, chc__block_slices_layout(b->n_columns).size);
     al->free(al->ud, b, sizeof *b);
 }
 
@@ -2763,15 +2785,33 @@ const chc_type   *chc_block_column_type(const chc_block *b, size_t i)
 const chc_column *chc_block_column(const chc_block *b, size_t i)
     { return (b && i < b->n_columns) ? b->columns[i] : NULL; }
 bool              chc_block_is_overflows(const chc_block *b) { return b ? b->is_overflows : false; }
-int32_t           chc_block_bucket_num(const chc_block *b)   { return b ? b->bucket_num : 0; }
+int32_t           chc_block_bucket_num(const chc_block *b)   { return b ? b->bucket_num : -1; }
+
+static int
+chc__block_alloc_columns(chc_block *b, const chc_alloc *al, size_t want, chc_err *err)
+{
+    chc__block_layout l = chc__block_slices_layout(want);
+    char *base = chc__calloc(al, l.size, err);
+    if (!base) return CHC_ERR_OOM;
+    char        **names     = (char **)        base;
+    chc_type    **types     = (chc_type **)   (base + l.types);
+    chc_column  **columns   = (chc_column **) (base + l.columns);
+    size_t       *name_lens = (size_t *)      (base + l.name_lens);
+    b->names     = names;
+    b->types     = types;
+    b->columns   = columns;
+    b->name_lens = name_lens;
+    b->n_columns = want;
+    return CHC_OK;
+}
 
 /* Resumable block reader. Continues a (possibly partial) block parse across
  * CHC_WOULD_BLOCK without re-parsing completed columns. Owns the `in`
  * checkpoint/rewind at packet-start and per-column granularity.
  *
  *   *blk == NULL : fresh packet. Checkpoint packet start, alloc block, parse
- *                  block-info header + ncols/nrows + per-column arrays, then
- *                  read columns from index 0.
+ *                  block-info header + ncols/nrows, allocate column arrays,
+ *                  then read columns from index 0.
  *   *blk != NULL : resume. Header already parsed; continue at *next_col,
  *                  re-reading only the in-progress column.
  *
@@ -2800,6 +2840,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
     if (b == NULL) {
         b = chc__calloc(al, sizeof *b, err);
         if (!b) return CHC_ERR_OOM;
+        b->bucket_num = -1; /* BlockInfo default, kept when frame has none */
         uint64_t consumed_before = in->consumed;
 
         /* Checkpoint packet start so a mid-header would-block rewinds here. */
@@ -2856,16 +2897,10 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
             goto header_fail;
         }
 
-        b->n_columns = (size_t) ncols;
-        b->n_rows    = (size_t) nrows;
+        b->n_rows = (size_t) nrows;
         if (ncols) {
-            b->names     = chc__calloc(al, ncols * sizeof *b->names,     err);
-            b->name_lens = chc__calloc(al, ncols * sizeof *b->name_lens, err);
-            b->types     = chc__calloc(al, ncols * sizeof *b->types,     err);
-            b->columns   = chc__calloc(al, ncols * sizeof *b->columns,   err);
-            if (!b->names || !b->name_lens || !b->types || !b->columns) {
-                rc = CHC_ERR_OOM; goto header_fail;
-            }
+            rc = chc__block_alloc_columns(b, al, (size_t) ncols, err);
+            if (rc != CHC_OK) goto header_fail;
         }
 
         /* Header fully parsed; commit the block and start at column 0. */
@@ -2951,7 +2986,7 @@ int
 chc_block_read(chc_in *in, const chc_alloc *al,
                const chc_block_opts *opts, chc_block **out, chc_err *err)
 {
-    chc_block_opts def = {};
+    chc_block_opts def = {0};
     if (!opts) opts = &def;
     /* Snapshot to roll back resume's per-column checkpoint progress: this
      * non-resuming entry is baseline (rewind to packet start), so a would-block
@@ -3256,7 +3291,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
                                       c->n_rows, err);
 
     case CHC_NULLABLE:
-        if (c->layout != CHC_COL_NULLABLE || t->n_children != 1)
+        if (c->layout != CHC_COL_NULLABLE)
             return chc__col_write_mismatch(err, t);
         if (c->n_rows
             && (rc = chc__write_bytes(io, c->nullable.null_map, c->n_rows, err)))
@@ -3264,7 +3299,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
         return chc__col_write(io, c->nullable.inner, t->children[0], err);
 
     case CHC_ARRAY:
-        if (c->layout != CHC_COL_ARRAY || t->n_children != 1)
+        if (c->layout != CHC_COL_ARRAY)
             return chc__col_write_mismatch(err, t);
         if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err)))
             return rc;
@@ -3272,8 +3307,8 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
 
     case CHC_MAP:
     case CHC_NESTED: {
-        size_t arity = t->kind == CHC_MAP ? 2 : t->n_children;
-        if (c->layout != CHC_COL_ARRAY || !arity || t->n_children != arity)
+        size_t arity = t->n_children;
+        if (c->layout != CHC_COL_ARRAY)
             return chc__col_write_mismatch(err, t);
         if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err)))
             return rc;
@@ -3296,8 +3331,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
 
     case CHC_QBIT: {
         size_t bits = chc_type_qbit_element_size(t);
-        if (!bits || t->n_children != 1
-            || c->layout != CHC_COL_TUPLE || c->tuple.arity != bits)
+        if (c->layout != CHC_COL_TUPLE || c->tuple.arity != bits)
             return chc__col_write_mismatch(err, t);
         size_t bytes_per_plane = (chc_type_qbit_dimension(t) + 7) / 8;
         for (size_t i = 0; i < bits; i++) {
@@ -3311,13 +3345,12 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
     }
 
     case CHC_LOW_CARDINALITY: {
-        if (c->layout != CHC_COL_LOW_CARDINALITY || t->n_children != 1)
+        if (c->layout != CHC_COL_LOW_CARDINALITY)
             return chc__col_write_mismatch(err, t);
         /* Empty LC, including one under empty Array, has no body */
         if (c->n_rows == 0) return CHC_OK;
         const chc_type *inner = t->children[0];
-        const chc_type *dict_type = (inner->kind == CHC_NULLABLE
-                                     && inner->n_children == 1)
+        const chc_type *dict_type = inner->kind == CHC_NULLABLE
                                   ? inner->children[0] : inner;
         /* Reader wraps LC(Nullable) dict in Nullable for caller dispatch. Wire
          * body contains inner-typed strings with null sentinel at slot 0.
@@ -3345,7 +3378,6 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
     }
 
     case CHC_SIMPLE_AGGREGATE_FUNCTION:
-        if (t->n_children < 1) return chc__col_write_mismatch(err, t);
         return chc__col_write(io, c, t->children[0], err);
 
     case CHC_POINT:
@@ -3358,7 +3390,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
 
     case CHC_NOTHING:
     case CHC_VOID: {
-        uint8_t zeros[256] = {};
+        uint8_t zeros[256] = {0};
         size_t left = c->n_rows;
         while (left) {
             size_t take = left < sizeof zeros ? left : sizeof zeros;
@@ -3378,7 +3410,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
                      size_t n_cols, size_t n_rows,
                      const chc_block_opts *opts, chc_err *err)
 {
-    chc_block_opts def = {};
+    chc_block_opts def = {0};
     if (!opts) opts = &def;
 
     if (opts->has_block_info) {
@@ -3404,12 +3436,9 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
         rc = chc__write_string(io, e->name, e->name_len, err);
         if (rc != CHC_OK) return rc;
 
-        char tbuf[256];
-        size_t need = chc_type_format(e->type, tbuf, sizeof tbuf);
-        if (need >= sizeof tbuf)
-            return chc__err_set(err, CHC_ERR_USAGE,
-                "type name too long for inline buffer");
-        rc = chc__write_string(io, tbuf, need, err);
+        size_t type_len;
+        const char *type_name = chc_type_name(e->type, &type_len);
+        rc = chc__write_string(io, type_name, type_len, err);
         if (rc != CHC_OK) return rc;
 
         if (opts->has_custom_serialization) {
